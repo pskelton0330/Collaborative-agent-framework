@@ -1,0 +1,58 @@
+#!/bin/sh
+# Primary-side: move finished exchange(s) into shared/archive/<id>/, and reset
+# status to idle when one of the archived ids was the active request. Accepts
+# multiple ids so a whole re-audit thread archives in one call.
+#
+# Two-phase: validate EVERY id first (format, no existing archive, has artifacts);
+# only then move anything. So a bad id can't leave a thread half-archived with a
+# dangling active_request.
+set -eu
+. "$(cd "$(dirname "$0")" && pwd)/_common.sh"
+
+usage() { echo "Usage: archive-request [--force] <request-id> [<request-id>...]" >&2; exit 2; }
+
+FORCE=0; IDS=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --force) FORCE=1; shift ;;
+    -h|--help) usage ;;
+    -*) echo "Unknown arg: $1" >&2; usage ;;
+    *) IDS="$IDS $1"; shift ;;
+  esac
+done
+[ -n "$IDS" ] || usage
+
+# --- Phase 1: validate everything before touching the filesystem. ---
+for ID in $IDS; do
+  valid_id "$ID" || { echo "Bad id '$ID'. Aborting — nothing moved." >&2; exit 2; }
+  if [ -e "$ARCHIVE/$ID" ] && [ "$FORCE" -ne 1 ]; then
+    echo "Archive already exists: $ARCHIVE/$ID (use --force). Aborting — nothing moved." >&2
+    exit 1
+  fi
+  if [ ! -e "$REQUESTS/$ID.md" ] && [ ! -e "$ESCALATION/$ID.escalation.md" ] && [ ! -e "$RESPONSES/$ID.response.md" ]; then
+    echo "Nothing to archive for $ID (no request/response/escalation). Aborting — nothing moved." >&2
+    exit 1
+  fi
+done
+
+# --- Phase 2: perform the moves. ---
+active=$(json_get '.active_request' "")
+reset_status=0
+for ID in $IDS; do
+  dest="$ARCHIVE/$ID"
+  mkdir -p "$dest"
+  [ -e "$REQUESTS/$ID.md" ]              && mv "$REQUESTS/$ID.md" "$dest/request.md"
+  [ -e "$ESCALATION/$ID.escalation.md" ] && mv "$ESCALATION/$ID.escalation.md" "$dest/escalation.md"
+  [ -e "$RESPONSES/$ID.response.md" ]    && mv "$RESPONSES/$ID.response.md" "$dest/response.md"
+  log_append "PRIMARY" "ARCHIVE" "Archived exchange." "$ID/"
+  echo "Archived $ID -> $dest"
+  [ "$ID" = "$active" ] && reset_status=1
+done
+
+if [ "$reset_status" -eq 1 ]; then
+  status_set '.state="idle"' '.owner="primary"' '.updated_by="primary"' '.active_request=null' || true
+  echo "Status reset to idle (archived the active request)."
+  [ "$HAVE_JQ" -eq 1 ] || echo "(jq not found — set status.json: state=idle, owner=primary, active_request=null.)" >&2
+else
+  echo "Note: none of the archived ids was the active request; status left unchanged." >&2
+fi

@@ -1,0 +1,48 @@
+#!/bin/sh
+# Pretty-print status.json and a small summary of open work.
+set -eu
+. "$(cd "$(dirname "$0")" && pwd)/_common.sh"
+
+[ -f "$STATUS" ] || { echo "No status.json at $STATUS" >&2; exit 1; }
+
+if [ "$HAVE_JQ" -eq 1 ]; then
+  jq . "$STATUS"
+else
+  cat "$STATUS"
+fi
+
+count() {
+  d=$1; pat=$2; n=0
+  for f in "$d"/$pat; do
+    [ -e "$f" ] || continue
+    [ "$(basename "$f")" = ".gitkeep" ] && continue
+    n=$((n + 1))
+  done
+  printf '%s' "$n"
+}
+
+archived=0
+if [ -d "$ARCHIVE" ]; then
+  for d in "$ARCHIVE"/*/; do [ -d "$d" ] && archived=$((archived + 1)); done
+fi
+
+unprocessed=0
+for f in "$REQUESTS"/*.md "$ESCALATION"/*.escalation.md; do
+  [ -e "$f" ] || continue
+  b=$(basename "$f")
+  case "$b" in
+    .gitkeep) continue ;;
+    *.escalation.md) id=${b%.escalation.md} ;;
+    *.md) id=${b%.md} ;;
+    *) continue ;;
+  esac
+  [ -e "$RESPONSES/$id.response.md" ] && continue
+  unprocessed=$((unprocessed + 1))
+done
+
+echo "---"
+echo "unprocessed requests:   $unprocessed   (awaiting a Secondary response)"
+echo "request files present:  $(count "$REQUESTS" '*.md')"
+echo "escalation files:       $(count "$ESCALATION" '*.escalation.md')"
+echo "responses (unarchived): $(count "$RESPONSES" '*.response.md')"
+echo "archived threads:       $archived"

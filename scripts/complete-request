@@ -1,0 +1,70 @@
+#!/bin/sh
+# Secondary-side: publish the review response for <id> and hand the turn back to
+# the Primary. The Secondary writes its response to the staging path:
+#     shared/responses/<id>.response.md.tmp
+# This script validates it and ATOMICALLY renames it to the final path. The final
+# file is the authoritative "review complete" signal (PROTOCOL §4/§14), so this is
+# the only sanctioned way to create it. A response written straight to the final
+# path is rejected — that would bypass validation and the atomic-staging contract,
+# and could unblock `watch --response` on a half-written file.
+set -eu
+. "$(cd "$(dirname "$0")" && pwd)/_common.sh"
+
+ID=${1:-}
+[ -n "$ID" ] || { echo "Usage: complete-request <request-id>" >&2; exit 2; }
+valid_id "$ID" || { echo "Bad id '$ID'." >&2; exit 2; }
+
+final="$RESPONSES/$ID.response.md"
+tmp="$final.tmp"
+
+# A matching PUBLISHED request (or escalation) must exist, and the response must
+# not already be published.
+if [ ! -e "$REQUESTS/$ID.md" ] && [ ! -e "$ESCALATION/$ID.escalation.md" ]; then
+  echo "No published request for $ID (looked in requests/ and escalation/). Refusing." >&2
+  exit 1
+fi
+[ -e "$final" ] && { echo "Response already published: $final. Refusing to republish." >&2; exit 1; }
+[ -e "$tmp" ] || { echo "No staged response. Write it to: $tmp  (then run this again)." >&2; exit 1; }
+
+if [ -e "$REQUESTS/$ID.md" ]; then reqfile="$REQUESTS/$ID.md"; else reqfile="$ESCALATION/$ID.escalation.md"; fi
+req_cycle=$(grep -m1 '^review_cycle:' "$reqfile" | sed 's/^review_cycle:[[:space:]]*//;s/[[:space:]]*#.*//') || req_cycle=""
+
+# --- Validate the staged response front-matter. ---
+errs=""
+rid=$(grep -m1 '^request_id:' "$tmp" | sed 's/^request_id:[[:space:]]*//') || rid=""
+[ "$rid" = "$ID" ] || errs="$errs\n  - request_id ('$rid') does not match $ID"
+
+approval=$(grep -m1 '^approval:' "$tmp" | sed 's/^approval:[[:space:]]*//;s/[[:space:]]*#.*//') || approval=""
+case "$approval" in
+  APPROVED|APPROVED_WITH_CONCERNS|BLOCKED) : ;;
+  *) errs="$errs\n  - approval ('$approval') must be APPROVED | APPROVED_WITH_CONCERNS | BLOCKED" ;;
+esac
+
+risk=$(grep -m1 '^risk:' "$tmp" | sed 's/^risk:[[:space:]]*//;s/[[:space:]]*#.*//') || risk=""
+case "$risk" in
+  low|medium|high) : ;;
+  *) errs="$errs\n  - risk ('$risk') must be low | medium | high" ;;
+esac
+
+rc=$(grep -m1 '^review_cycle:' "$tmp" | sed 's/^review_cycle:[[:space:]]*//;s/[[:space:]]*#.*//') || rc=""
+case "$rc" in
+  ''|*[!0-9]*) errs="$errs\n  - review_cycle ('$rc') must be an integer" ;;
+  *) if [ -n "$req_cycle" ] && [ "$rc" != "$req_cycle" ]; then
+       errs="$errs\n  - review_cycle ($rc) does not match the request's review_cycle ($req_cycle)"
+     fi ;;
+esac
+
+if [ -n "$errs" ]; then
+  printf 'REFUSED to publish response for %s — invalid front-matter:%b\n' "$ID" "$errs" >&2
+  echo "Fix $tmp, then run complete-request again." >&2
+  exit 1
+fi
+
+# --- Atomic publish, then flip status. ---
+mv "$tmp" "$final"
+status_set '.state="response_ready"' '.owner="primary"' '.updated_by="secondary"' || true
+log_append "SECONDARY" "RESPONSE" "Response ready ($approval, risk: $risk, cycle $rc)." "$ID"
+
+echo "Published response for $ID ($approval, risk $risk). Primary owns the turn now."
+[ "$HAVE_JQ" -eq 1 ] || \
+  echo "(jq not found — set status.json: state=response_ready, owner=primary.)" >&2

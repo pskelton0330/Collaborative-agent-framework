@@ -1,0 +1,72 @@
+#!/bin/sh
+# Block until there is work, then return.
+#
+#   watch                      Secondary mode: wait for any UNPROCESSED request
+#                              (a request/escalation file with no matching
+#                              response). Prints the id(s), exit 0.
+#   watch --response <id>      Primary mode: wait until the response for <id>
+#                              exists. Prints <id>, exit 0.
+#
+# Exit codes: 0 = work found (ids printed) | 2 = idle timeout reached |
+#             3 = paused (status.human_required is set; Secondary mode only).
+# Poll interval and idle timeout come from status.json limits (defaults 8/3600).
+set -eu
+. "$(cd "$(dirname "$0")" && pwd)/_common.sh"
+
+MODE="any"; WANT_ID=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --response) MODE="response"; WANT_ID=${2:-}; shift 2 ;;
+    -h|--help) echo "Usage: watch [--response <request-id>]" >&2; exit 2 ;;
+    *) echo "Unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+[ "$MODE" = "response" ] && [ -z "$WANT_ID" ] && { echo "--response needs an id" >&2; exit 2; }
+
+INTERVAL=$(json_get '.limits.idle_poll_seconds' 8)
+MAX_IDLE=$(json_get '.limits.max_idle_seconds' 3600)
+case "$INTERVAL" in *[!0-9]*|'') INTERVAL=8 ;; esac
+case "$MAX_IDLE" in *[!0-9]*|'') MAX_IDLE=3600 ;; esac
+
+unprocessed() {
+  out=""
+  for f in "$REQUESTS"/*.md "$ESCALATION"/*.escalation.md; do
+    [ -e "$f" ] || continue
+    b=$(basename "$f")
+    case "$b" in
+      .gitkeep) continue ;;
+      *.escalation.md) id=${b%.escalation.md} ;;
+      *.md) id=${b%.md} ;;
+      *) continue ;;
+    esac
+    [ -e "$RESPONSES/$id.response.md" ] && continue
+    out="$out$id\n"
+  done
+  printf '%b' "$out"
+}
+
+elapsed=0
+while : ; do
+  if [ "$MODE" = "response" ]; then
+    if [ -e "$RESPONSES/$WANT_ID.response.md" ]; then
+      printf '%s\n' "$WANT_ID"
+      exit 0
+    fi
+  else
+    if [ "$(json_get '.human_required' false)" = "true" ]; then
+      echo "PAUSED: status.human_required is set. Staying idle (no review)." >&2
+      exit 3
+    fi
+    ids=$(unprocessed)
+    if [ -n "$ids" ]; then
+      printf '%s\n' "$ids" | sed '/^$/d'
+      exit 0
+    fi
+  fi
+  if [ "$elapsed" -ge "$MAX_IDLE" ]; then
+    echo "IDLE: no work after ${MAX_IDLE}s." >&2
+    exit 2
+  fi
+  sleep "$INTERVAL"
+  elapsed=$((elapsed + INTERVAL))
+done

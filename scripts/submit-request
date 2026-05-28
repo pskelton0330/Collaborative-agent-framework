@@ -1,0 +1,81 @@
+#!/bin/sh
+# Validate a filled-in request draft and atomically publish it so the Secondary
+# can pick it up. Second half of the new-request -> edit -> submit-request flow,
+# which guarantees the Secondary never sees a placeholder or half-written request.
+set -eu
+. "$(cd "$(dirname "$0")" && pwd)/_common.sh"
+
+ID=${1:-}
+[ -n "$ID" ] || { echo "Usage: submit-request <request-id>" >&2; exit 2; }
+valid_id "$ID" || { echo "Bad id '$ID'." >&2; exit 2; }
+
+if [ -e "$REQUESTS/$ID.md.draft" ]; then
+  draft="$REQUESTS/$ID.md.draft"; final="$REQUESTS/$ID.md"; kind="request"
+elif [ -e "$ESCALATION/$ID.escalation.md.draft" ]; then
+  draft="$ESCALATION/$ID.escalation.md.draft"; final="$ESCALATION/$ID.escalation.md"; kind="escalation"
+else
+  echo "No draft found for $ID. Create one first: scripts/new-request --type <type>" >&2
+  exit 1
+fi
+[ -e "$final" ] && { echo "Already published: $final" >&2; exit 1; }
+
+# --- Validate the draft is actually filled in (not template placeholders). ---
+errs=""
+fm_id=$(grep -m1 '^request_id:' "$draft" | sed 's/^request_id:[[:space:]]*//') || fm_id=""
+[ "$fm_id" = "$ID" ] || errs="$errs\n  - request_id front-matter ('$fm_id') does not match $ID"
+
+if grep -q 'path/to/file' "$draft"; then
+  errs="$errs\n  - files: still contains the 'path/to/file' placeholder"
+fi
+nfiles=$(awk '/^files:/{f=1;next} f==1 && /^[[:space:]]*-[[:space:]]*[^[:space:]]/{c++;next} f==1 && /^[^[:space:]]/{f=0} END{print c+0}' "$draft")
+[ "${nfiles:-0}" -ge 1 ] || errs="$errs\n  - files: must list at least one file"
+
+if [ "$kind" = "request" ]; then
+  if grep -q '<Background the reviewer needs' "$draft"; then
+    errs="$errs\n  - 'Context summary' is still the template placeholder"
+  fi
+  if grep -q '<Concrete question 1' "$draft"; then
+    errs="$errs\n  - 'Specific questions' are still template placeholders"
+  fi
+  if grep -q '<Describe what a good answer' "$draft"; then
+    errs="$errs\n  - expected_output is still the template placeholder"
+  fi
+else
+  if grep -q '<Which trigger fired' "$draft"; then
+    errs="$errs\n  - 'Why this escalated' is still the template placeholder"
+  fi
+fi
+
+# Counters must be integers; thread must be null or a valid request id.
+for fld in retry_count escalation_level review_cycle; do
+  val=$(grep -m1 "^$fld:" "$draft" | sed "s/^$fld:[[:space:]]*//;s/[[:space:]]*#.*//") || val=""
+  case "$val" in ''|*[!0-9]*) errs="$errs\n  - $fld ('$val') must be an integer" ;; esac
+done
+thr=$(grep -m1 '^thread:' "$draft" | sed 's/^thread:[[:space:]]*//;s/[[:space:]]*#.*//') || thr=""
+case "$thr" in
+  null) : ;;
+  *) valid_id "$thr" || errs="$errs\n  - thread ('$thr') must be null or a valid request id" ;;
+esac
+
+if [ -n "$errs" ]; then
+  printf 'REFUSED to publish %s — draft is incomplete:%b\n' "$ID" "$errs" >&2
+  echo "Fill the draft in, then run submit-request again." >&2
+  exit 1
+fi
+
+# --- Atomic publish, then flip status (file move is the trigger; status follows). ---
+mv "$draft" "$final"
+if [ "$kind" = "escalation" ]; then
+  status_set '.state="escalated"' '.owner="secondary"' '.updated_by="primary"' \
+    ".active_request=\"$ID\"" '.cycle.escalation_level=(.cycle.escalation_level+1)' || true
+  log_append "PRIMARY" "ESCALATION" "Published escalation request." "$ID"
+else
+  status_set '.state="request_pending"' '.owner="secondary"' '.updated_by="primary"' \
+    ".active_request=\"$ID\"" || true
+  log_append "PRIMARY" "REQUEST" "Published review request." "$ID"
+fi
+
+echo "Published $ID -> $final"
+echo "Wait for the response with: scripts/watch --response $ID" >&2
+[ "$HAVE_JQ" -eq 1 ] || \
+  echo "(jq not found — set status.json: state=request_pending/escalated, owner=secondary, active_request=$ID)" >&2

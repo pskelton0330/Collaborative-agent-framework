@@ -1,0 +1,115 @@
+#!/bin/sh
+# Create a DRAFT request from the matching template. The draft is NOT visible to
+# the Secondary (watch ignores *.draft) and status is NOT changed yet — that way
+# the Secondary can never pick up a half-written request. Fill the draft in, then
+# publish it with: scripts/submit-request <id>.
+#
+# Prints the request id on stdout; diagnostics go to stderr.
+set -eu
+. "$(cd "$(dirname "$0")" && pwd)/_common.sh"
+
+usage() {
+  cat >&2 <<'EOF'
+Usage: new-request --type <type> [--files "a,b,c"] [--id <id>]
+
+  --type    security | architecture | bug-risk | regression |
+            test-coverage | performance | pre-commit | escalation
+  --files   comma-separated file list to pre-fill into the request (optional)
+  --id      override the auto-generated request id (optional)
+
+Creates a DRAFT (shared/requests/<id>.md.draft, or
+shared/escalation/<id>.escalation.md.draft for escalation), pre-fills
+id/created_at/type/counters (and files if given). Does NOT touch status.json or
+the log. Prints the new id. Publish with: scripts/submit-request <id>.
+EOF
+  exit 2
+}
+
+TYPE=""; FILES=""; ID=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --type) TYPE=${2:-}; shift 2 ;;
+    --files) FILES=${2:-}; shift 2 ;;
+    --id) ID=${2:-}; shift 2 ;;
+    -h|--help) usage ;;
+    *) echo "Unknown arg: $1" >&2; usage ;;
+  esac
+done
+[ -n "$TYPE" ] || usage
+
+case "$TYPE" in
+  security|architecture|bug-risk|regression|test-coverage|performance|pre-commit|escalation) : ;;
+  *) echo "Unknown type: $TYPE" >&2; usage ;;
+esac
+
+if [ -n "$ID" ]; then
+  valid_id "$ID" || { echo "Bad --id '$ID' (want REQ-YYYYMMDD-HHMMSS-<known-type>)." >&2; exit 2; }
+  [ "${ID#REQ-????????-??????-}" = "$TYPE" ] || { echo "--id type suffix must match --type ($TYPE)." >&2; exit 2; }
+else
+  ID="REQ-$(date -u +%Y%m%d-%H%M%S)-$TYPE"
+fi
+
+id_in_use "$ID" && { echo "Refusing: id '$ID' already exists (open or archived)." >&2; exit 1; }
+
+if [ "$TYPE" = "escalation" ]; then
+  # Mechanical loop guard: do not allow more escalations than the protocol permits.
+  elv_now=$(json_get '.cycle.escalation_level' 0)
+  maxesc=$(json_get '.limits.max_escalation_cycles' 2)
+  case "$elv_now" in *[!0-9]*|'') elv_now=0 ;; esac
+  case "$maxesc" in *[!0-9]*|'') maxesc=2 ;; esac
+  if [ "$elv_now" -ge "$maxesc" ]; then
+    echo "REFUSED: escalation_level is $elv_now (max $maxesc). Do the HUMAN HANDOFF instead:" >&2
+    echo "  set status.json human_required=true, state=human_required, owner=human;" >&2
+    echo "  append a HUMAN_REQUIRED entry to the master log; stop automating and ask the user." >&2
+    exit 3
+  fi
+  draft="$ESCALATION/$ID.escalation.md.draft"
+  tmpl="$TEMPLATES/escalation-request.md"
+else
+  draft="$REQUESTS/$ID.md.draft"
+  tmpl="$TEMPLATES/audit-request.md"
+fi
+
+[ -f "$tmpl" ] || { echo "Template missing: $tmpl" >&2; exit 1; }
+
+# Counters to mirror into the draft (snapshot — status.json stays authoritative).
+created=$(now_iso)
+rcv=$(json_get '.cycle.retry_count' 0)
+elv=$(json_get '.cycle.escalation_level' 0)
+rwc=$(json_get '.cycle.review_cycles' 0)
+case "$rcv" in *[!0-9]*|'') rcv=0 ;; esac
+case "$elv" in *[!0-9]*|'') elv=0 ;; esac
+case "$rwc" in *[!0-9]*|'') rwc=0 ;; esac
+rvv=$((rwc + 1))
+[ "$TYPE" = "escalation" ] && elv=$((elv + 1))   # the level this escalation will establish
+
+# Build the files: block (newline-joined "  - path"), if provided.
+files_block=""
+if [ -n "$FILES" ]; then
+  oldIFS=$IFS; IFS=','
+  for f in $FILES; do
+    f=$(printf '%s' "$f" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    [ -n "$f" ] && files_block="$files_block  - $f\n"
+  done
+  IFS=$oldIFS
+fi
+
+cp "$tmpl" "$draft"
+awk -v id="$ID" -v cr="$created" -v ty="$TYPE" \
+    -v rcv="$rcv" -v elv="$elv" -v rvv="$rvv" -v files="$files_block" '
+  !rid && /^request_id:/      { sub(/^request_id:.*/,      "request_id: " id); rid=1; print; next }
+  !crd && /^created_at:/      { sub(/^created_at:.*/,      "created_at: " cr); crd=1; print; next }
+  !typ && /^type:/            { sub(/^type:.*/,            "type: " ty);       typ=1; print; next }
+  !rc  && /^retry_count:/     { sub(/^retry_count:.*/,     "retry_count: " rcv); rc=1; print; next }
+  !el  && /^escalation_level:/{ sub(/^escalation_level:.*/,"escalation_level: " elv); el=1; print; next }
+  !rv  && /^review_cycle:/    { sub(/^review_cycle:.*/,    "review_cycle: " rvv); rv=1; print; next }
+  files != "" && sf==0 && /^files:/ { print "files:"; printf "%s", files; sf=1; next }
+  sf==1 && /^[[:space:]]+-[[:space:]]/ { next }
+  sf==1 { sf=0; print; next }
+  { print }
+' "$draft" > "$draft.tmp" && mv "$draft.tmp" "$draft"
+
+printf '%s\n' "$ID"
+echo "Draft created: $draft" >&2
+echo "Next: fill in files/context/questions, then publish with:" >&2
+echo "  scripts/submit-request $ID" >&2
