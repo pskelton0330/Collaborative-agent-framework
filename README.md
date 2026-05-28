@@ -80,7 +80,8 @@ convention — rename it if you like.
    away.
 3. **Launch the Secondary Agent** in a second terminal/session and paste that
    prompt (it enters monitoring mode), then tell the Primary to go (e.g.
-   "secondary's up").
+   "secondary's up"). To work solo, just tell the Primary to proceed without a
+   secondary.
 4. **Work with the Primary as usual.** At meaningful checkpoints it creates review
    requests; the Secondary answers them; the Primary applies the feedback and
    reports back to you.

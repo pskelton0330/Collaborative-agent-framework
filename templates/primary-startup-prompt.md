@@ -31,6 +31,7 @@ meaningful checkpoints, create review requests for the Secondary, incorporate it
 responses, track retries/escalations against the limits in `status.json`, and
 never loop without bound. Summarize outcomes to me as you go.
 
-Once I confirm the Secondary is ready, begin this task:
+Once I confirm the Secondary is ready, or tell you to proceed without one, begin
+this task:
 
 <DESCRIBE YOUR TASK HERE>
