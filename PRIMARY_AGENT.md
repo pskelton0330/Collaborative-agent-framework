@@ -33,11 +33,13 @@ Do these once, in order:
    fix anything.
 3. **Generate the Secondary startup prompt** for the user: take
    `templates/secondary-startup-prompt.md`, fill in the absolute path to this
-   `agent-framework/` folder, and present it in a copy-paste block. Tell the
-   user to open a second terminal/session and paste it.
-4. Confirm with the user that the Secondary is running before relying on reviews.
-   (You can proceed with implementation regardless; reviews just won't be
-   answered until the Secondary is up.)
+   `agent-framework/` folder, and present it in a fenced copy-paste block as the
+   **last thing in your turn**.
+4. **Stop and wait for the go-ahead — do not start any implementation yet.** End
+   your turn right after the prompt so it stays on screen instead of scrolling
+   away. Ask the user to launch the Secondary (paste the prompt into a second
+   session) and reply when it's ready — e.g. "secondary's up" / "go", or "proceed
+   without a secondary". Begin the task only after they confirm.
 
 ---
 

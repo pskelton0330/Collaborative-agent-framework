@@ -74,10 +74,13 @@ convention — rename it if you like.
 1. **Copy** this `agent-framework/` folder into the root of your project.
 2. **Launch the Primary Agent** and paste the contents of
    [`templates/primary-startup-prompt.md`](templates/primary-startup-prompt.md) as
-   its first message (then describe your task). It will initialize shared state and
-   print a filled-in **Secondary startup prompt** for you to copy.
+   its first message (then describe your task). It initializes shared state, prints
+   a filled-in **Secondary startup prompt**, and then **pauses** — it won't start
+   your task until you confirm the Secondary is up, so the prompt doesn't scroll
+   away.
 3. **Launch the Secondary Agent** in a second terminal/session and paste that
-   prompt. It reads the docs and enters monitoring mode.
+   prompt (it enters monitoring mode), then tell the Primary to go (e.g.
+   "secondary's up").
 4. **Work with the Primary as usual.** At meaningful checkpoints it creates review
    requests; the Secondary answers them; the Primary applies the feedback and
    reports back to you.
