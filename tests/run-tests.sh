@@ -240,7 +240,12 @@ reset_state
 id=$("$SC/new-request" --type bug-risk --files a 2>/dev/null); fill_draft "$SH/requests/$id.md.draft"; "$SC/submit-request" "$id" >/dev/null 2>&1
 stage_response "$id" APPROVED 1                      # old-format, no progress block
 err=$("$SC/complete-request" "$id" 2>&1 >/dev/null)  # capture STDERR only
-assert_eq "old-format complete: no stderr noise" "" "$err"
+# The F6 bug printed "integer expression expected"; assert specifically THAT is absent.
+# (Without jq there is a legitimate "jq not found" notice on stderr, which is fine.)
+case "$err" in
+  *"integer expression"*) bad "old-format complete: no integer-expr noise (F6)" "stderr: $err" ;;
+  *) ok "old-format complete: no integer-expr noise (F6)" ;;
+esac
 # direct fm_count unit: absent key must be exactly "0" (the F6 double-print bug gave "0\n0")
 printf -- '---\nrequest_id: R\napproval: APPROVED\n---\nbody\n' > "$SH/fmcount.md"
 cnt=$( . "$SC/_common.sh"; fm_count "$SH/fmcount.md" unresolved )
@@ -373,19 +378,28 @@ EOF
 cpv() { "$SC/check-progress" "$R" 2>/dev/null; }
 mkreq $R 1 null; mkresp $R 1 BLOCKED "F1, F2, F3" "" "F1, F2, F3" ok
 mkreq $C 2 $R;   mkresp $C 2 APPROVED_WITH_CONCERNS "F1" "F2, F3" "" ok
-assert_eq "productive (count down)" productive "$(cpv)"
-mkresp $R 1 BLOCKED "F1" "" "F1" ok; mkresp $C 2 BLOCKED "F1" "" "" ok
-assert_eq "impasse (stalled same set)" impasse "$(cpv)"
-mkresp $C 2 BLOCKED "F2" "F1" "F2" ok
-assert_eq "swap-churn -> impasse" impasse "$(cpv)"
-mkresp $C 2 BLOCKED "F2" "" "" ok
-assert_eq "unexplained churn -> insufficient-data" insufficient-data "$(cpv)"
-mkresp $C 2 BLOCKED "F1" "" "" unknown
-assert_eq "continuity unknown -> insufficient-data" insufficient-data "$(cpv)"
-mkresp $R 1 BLOCKED "F1" "" "F1" ok; mkresp $C 2 APPROVED_WITH_CONCERNS "F1" "" "" ok
-assert_eq "approval improved -> productive" productive "$(cpv)"
-rm -f "$SH/responses/$C.response.md" "$SH/requests/$C.md"
-assert_eq "single response -> insufficient-data" insufficient-data "$(cpv)"
+# Degradation: the overlay needs jq; without it check-progress returns insufficient-data
+# (so the count guard governs). Verify that explicitly, regardless of host jq.
+make_nojq
+assert_eq "no-jq -> insufficient-data (overlay off)" insufficient-data "$(PATH="$NOJQ" "$SC/check-progress" "$R" 2>/dev/null)"
+# The actual verdict logic requires jq; guard it so the harness is jq-optional.
+if [ "$have_jq" -eq 1 ]; then
+  assert_eq "productive (count down)" productive "$(cpv)"
+  mkresp $R 1 BLOCKED "F1" "" "F1" ok; mkresp $C 2 BLOCKED "F1" "" "" ok
+  assert_eq "impasse (stalled same set)" impasse "$(cpv)"
+  mkresp $C 2 BLOCKED "F2" "F1" "F2" ok
+  assert_eq "swap-churn -> impasse" impasse "$(cpv)"
+  mkresp $C 2 BLOCKED "F2" "" "" ok
+  assert_eq "unexplained churn -> insufficient-data" insufficient-data "$(cpv)"
+  mkresp $C 2 BLOCKED "F1" "" "" unknown
+  assert_eq "continuity unknown -> insufficient-data" insufficient-data "$(cpv)"
+  mkresp $R 1 BLOCKED "F1" "" "F1" ok; mkresp $C 2 APPROVED_WITH_CONCERNS "F1" "" "" ok
+  assert_eq "approval improved -> productive" productive "$(cpv)"
+  rm -f "$SH/responses/$C.response.md" "$SH/requests/$C.md"
+  assert_eq "single response -> insufficient-data" insufficient-data "$(cpv)"
+else
+  printf '  ..   check-progress verdict tests skipped (no jq on host)\n'
+fi
 
 # =====================================================================================
 echo "[13] reopen-archived blocked"
