@@ -20,9 +20,17 @@ jobs:
         if: matrix.jq == 'no-jq'
         shell: bash
         run: |
-          # Exercise the jq-optional fallback paths end to end.
-          sudo rm -f "$(command -v jq)" || true
-          if command -v jq >/dev/null 2>&1; then echo "jq still present"; exit 1; fi
+          # Exercise the jq-optional fallback paths end to end. Remove EVERY jq on PATH;
+          # `hash -r` clears bash's cached command location so `command -v` reflects reality
+          # (and macOS runners may have jq in more than one prefix).
+          i=0
+          while command -v jq >/dev/null 2>&1 && [ "$i" -lt 6 ]; do
+            sudo rm -f "$(command -v jq)" || true
+            hash -r 2>/dev/null || true
+            i=$((i+1))
+          done
+          if command -v jq >/dev/null 2>&1; then echo "jq still present at $(command -v jq)"; exit 1; fi
+          echo "jq removed"
 
       - name: Ensure jq present (with-jq matrix leg)
         if: matrix.jq == 'with-jq'
