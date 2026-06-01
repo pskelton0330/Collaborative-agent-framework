@@ -54,12 +54,26 @@ done
 thr=$(grep -m1 '^thread:' "$draft" | sed 's/^thread:[[:space:]]*//;s/[[:space:]]*#.*//') || thr=""
 case "$thr" in
   null) : ;;
-  *) valid_id "$thr" || errs="$errs\n  - thread ('$thr') must be null or a valid request id" ;;
+  *) if ! valid_id "$thr"; then
+       errs="$errs\n  - thread ('$thr') must be null or a valid request id"
+     elif ! thread_root_exists "$thr"; then
+       errs="$errs\n  - thread root '$thr' is not a published request or archived thread"
+     fi ;;
 esac
 
 if [ -n "$errs" ]; then
   printf 'REFUSED to publish %s — draft is incomplete:%b\n' "$ID" "$errs" >&2
   echo "Fill the draft in, then run submit-request again." >&2
+  exit 1
+fi
+
+# --- Single-active invariant (file-authoritative, NOT status.json): refuse to publish
+# a second request while any PUBLISHED request still lacks a response. This holds even
+# if status.json has drifted, closing the orphaning bug a status-based check would miss.
+active=$(unprocessed_ids | head -1)
+if [ -n "$active" ]; then
+  echo "REFUSED to publish $ID — '$active' is still unprocessed (single-active invariant)." >&2
+  echo "Wait for its response (scripts/watch --response $active), or archive it first." >&2
   exit 1
 fi
 

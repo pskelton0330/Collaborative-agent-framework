@@ -29,30 +29,51 @@ fi
 if [ -e "$REQUESTS/$ID.md" ]; then reqfile="$REQUESTS/$ID.md"; else reqfile="$ESCALATION/$ID.escalation.md"; fi
 req_cycle=$(grep -m1 '^review_cycle:' "$reqfile" | sed 's/^review_cycle:[[:space:]]*//;s/[[:space:]]*#.*//') || req_cycle=""
 
-# --- Validate the staged response front-matter. ---
+# --- Validate the staged response. First the FULL response contract (front-matter
+# region only, duplicate keys rejected, required sections incl. trailing rationale),
+# then the id-specific cross-checks this script alone has the context for. ---
 errs=""
-rid=$(grep -m1 '^request_id:' "$tmp" | sed 's/^request_id:[[:space:]]*//') || rid=""
+if ! reason=$(validate_response_file "$tmp" 2>&1); then
+  errs="$errs\n  - $reason"
+fi
+
+rid=$(fm_value "$tmp" request_id) || rid=""
 [ "$rid" = "$ID" ] || errs="$errs\n  - request_id ('$rid') does not match $ID"
 
-approval=$(grep -m1 '^approval:' "$tmp" | sed 's/^approval:[[:space:]]*//;s/[[:space:]]*#.*//') || approval=""
-case "$approval" in
-  APPROVED|APPROVED_WITH_CONCERNS|BLOCKED) : ;;
-  *) errs="$errs\n  - approval ('$approval') must be APPROVED | APPROVED_WITH_CONCERNS | BLOCKED" ;;
-esac
+approval=$(fm_value "$tmp" approval) || approval=""
+rc=$(fm_value "$tmp" review_cycle) || rc=""
+risk=$(fm_value "$tmp" risk) || risk=""
+if [ -n "$rc" ] && [ -n "$req_cycle" ] && [ "$rc" != "$req_cycle" ]; then
+  errs="$errs\n  - review_cycle ($rc) does not match the request's review_cycle ($req_cycle)"
+fi
 
-risk=$(grep -m1 '^risk:' "$tmp" | sed 's/^risk:[[:space:]]*//;s/[[:space:]]*#.*//') || risk=""
-case "$risk" in
-  low|medium|high) : ;;
-  *) errs="$errs\n  - risk ('$risk') must be low | medium | high" ;;
-esac
-
-rc=$(grep -m1 '^review_cycle:' "$tmp" | sed 's/^review_cycle:[[:space:]]*//;s/[[:space:]]*#.*//') || rc=""
-case "$rc" in
-  ''|*[!0-9]*) errs="$errs\n  - review_cycle ('$rc') must be an integer" ;;
-  *) if [ -n "$req_cycle" ] && [ "$rc" != "$req_cycle" ]; then
-       errs="$errs\n  - review_cycle ($rc) does not match the request's review_cycle ($req_cycle)"
-     fi ;;
-esac
+# --- Progress overlay block (PROTOCOL §6): parsed from the FRONT-MATTER ONLY (a body
+# line starting `unresolved:` is ignored) and ATOMIC — either all five fields are
+# absent (cycle 1 / old-format; check-progress degrades to the count guard) or ALL
+# five are present, each EXACTLY ONCE, and valid. Ids strictly F<digits>; movement
+# boolean; continuity ok|unknown. So the overlay never parses ambiguous data.
+present=0; dup=0
+for fld in unresolved resolved_since new_this_cycle movement progress_continuity; do
+  c=$(fm_count "$tmp" "$fld")
+  [ "$c" -ge 1 ] && present=$((present + 1))
+  [ "$c" -gt 1 ] && dup=1
+done
+if [ "$dup" -eq 1 ]; then
+  errs="$errs\n  - progress block has a duplicated key (each field at most once)"
+elif [ "$present" -ne 0 ] && [ "$present" -ne 5 ]; then
+  errs="$errs\n  - progress block is partial ($present/5 fields); include all five or none"
+elif [ "$present" -eq 5 ]; then
+  for fld in unresolved resolved_since new_this_cycle; do
+    val=$(fm_value "$tmp" "$fld" | sed "s/[][,]/ /g") || val=""
+    for tok in $val; do
+      rest=${tok#[Ff]}
+      case "$tok" in [Ff]*) : ;; *) rest="x$rest" ;; esac          # force-fail if no F prefix
+      case "$rest" in ''|*[!0-9]*) errs="$errs\n  - $fld has non-id token '$tok' (want F<number>)" ;; esac
+    done
+  done
+  case "$(fm_value "$tmp" movement)" in true|false) : ;; *) errs="$errs\n  - movement must be true or false" ;; esac
+  case "$(fm_value "$tmp" progress_continuity)" in ok|unknown) : ;; *) errs="$errs\n  - progress_continuity must be ok or unknown" ;; esac
+fi
 
 if [ -n "$errs" ]; then
   printf 'REFUSED to publish response for %s — invalid front-matter:%b\n' "$ID" "$errs" >&2

@@ -24,9 +24,9 @@ done
 [ "$MODE" = "response" ] && [ -z "$WANT_ID" ] && { echo "--response needs an id" >&2; exit 2; }
 
 INTERVAL=$(json_get '.limits.idle_poll_seconds' 8)
-MAX_IDLE=$(json_get '.limits.max_idle_seconds' 3600)
+MAX_IDLE=$(json_get '.limits.max_idle_seconds' 900)
 case "$INTERVAL" in *[!0-9]*|'') INTERVAL=8 ;; esac
-case "$MAX_IDLE" in *[!0-9]*|'') MAX_IDLE=3600 ;; esac
+case "$MAX_IDLE" in *[!0-9]*|'') MAX_IDLE=900 ;; esac
 
 unprocessed() {
   out=""
@@ -48,7 +48,14 @@ unprocessed() {
 elapsed=0
 while : ; do
   if [ "$MODE" = "response" ]; then
-    if [ -e "$RESPONSES/$WANT_ID.response.md" ]; then
+    # Only treat the response as ready if it passes the FULL contract AND its embedded
+    # request_id matches the id we're waiting on — a partial, hand-written, or wrong-id
+    # file at the expected path does not unblock the wait. (The sanctioned
+    # complete-request publishes atomically with a matching id, so this never
+    # false-negatives a real response.)
+    rf="$RESPONSES/$WANT_ID.response.md"
+    if [ -e "$rf" ] && validate_response_file "$rf" 2>/dev/null && \
+       [ "$(fm_value "$rf" request_id)" = "$WANT_ID" ]; then
       printf '%s\n' "$WANT_ID"
       exit 0
     fi

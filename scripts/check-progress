@@ -1,0 +1,132 @@
+#!/bin/sh
+# Progress overlay for a review thread (PROTOCOL §10). Reads the two most recent
+# responses in a thread and prints exactly one verdict on stdout:
+#
+#   productive          there was net improvement (fewer unresolved OR better approval)
+#   impasse             continuity ok, algebra clean, but NO net improvement
+#   insufficient-data   <2 responses, missing progress block, continuity unknown,
+#                       or unexplained churn (the signal can't be trusted)
+#
+# This is a TIGHTENING OVERLAY: it can make the Primary stop EARLIER than the count
+# guard (`max_review_cycles`), never later. `impasse` is a deliberately conservative
+# early-stop heuristic (a real fix plus an unrelated equal-size new finding can also
+# trip it) — safe by construction because the count guard remains authoritative and
+# the overlay never extends the loop. The Primary acts on the verdict (PRIMARY_AGENT).
+#
+# Exit codes: 0 productive | 2 insufficient-data | 3 impasse | 1 usage/error.
+# Requires jq for the structured read; without jq it prints insufficient-data (the
+# count guard then governs) so safety never depends on the overlay.
+set -eu
+. "$(cd "$(dirname "$0")" && pwd)/_common.sh"
+
+ROOT=${1:-}
+[ -n "$ROOT" ] || { echo "Usage: check-progress <thread-root-request-id>" >&2; exit 1; }
+valid_id "$ROOT" || { echo "Bad thread-root id '$ROOT'." >&2; exit 1; }
+
+emit() { printf '%s\n' "$1"; exit "$2"; }
+
+# Without jq we cannot reliably parse the YAML lists; degrade to the count guard.
+[ "$HAVE_JQ" -eq 1 ] || { echo "(jq not found — progress overlay disabled; count guard governs)" >&2; emit insufficient-data 2; }
+
+# --- Collect responses in this thread (root id, or any id whose request set thread:=root). ---
+# A response belongs to the thread if its request (open or archived) is the root or
+# names the root in `thread:`. We read review_cycle + the progress block from each
+# response and keep the two highest review_cycles.
+thread_of() { # echo the thread root for a request id by inspecting its request file
+  rid=$1
+  for f in "$REQUESTS/$rid.md" "$ESCALATION/$rid.escalation.md" "$ARCHIVE/$rid/request.md" "$ARCHIVE/$rid/escalation.md"; do
+    [ -e "$f" ] || continue
+    t=$(grep -m1 '^thread:' "$f" | sed 's/^thread:[[:space:]]*//;s/[[:space:]]*#.*//')
+    case "$t" in null|'') printf '%s' "$rid" ;; *) printf '%s' "$t" ;; esac
+    return 0
+  done
+  printf '%s' "$rid"
+}
+
+# Gather candidate response files (live + archived).
+list_responses() {
+  for f in "$RESPONSES"/*.response.md "$ARCHIVE"/*/response.md; do
+    [ -e "$f" ] || continue
+    printf '%s\n' "$f"
+  done
+}
+
+# Build "cycle<TAB>file" for responses whose thread root == ROOT, then sort by cycle.
+rows=$(
+  list_responses | while IFS= read -r f; do
+    rid=$(grep -m1 '^request_id:' "$f" | sed 's/^request_id:[[:space:]]*//')
+    [ -n "$rid" ] || continue
+    [ "$(thread_of "$rid")" = "$ROOT" ] || continue
+    cyc=$(grep -m1 '^review_cycle:' "$f" | sed 's/^review_cycle:[[:space:]]*//' | tr -cd '0-9')
+    [ -n "$cyc" ] || cyc=0
+    printf '%s\t%s\n' "$cyc" "$f"
+  done | sort -n -k1,1
+)
+
+n=$(printf '%s\n' "$rows" | sed '/^$/d' | wc -l | tr -d ' ')
+[ "$n" -ge 2 ] || emit insufficient-data 2
+
+prev=$(printf '%s\n' "$rows" | sed '/^$/d' | tail -2 | head -1 | cut -f2-)
+curr=$(printf '%s\n' "$rows" | sed '/^$/d' | tail -1 | cut -f2-)
+
+# --- Pull a structured field from a response's front-matter. ---
+# Lists are written inline as `key: [F1, F3]`; we normalise to space-separated ids.
+fm_scalar() { grep -m1 "^$2:" "$1" | sed "s/^$2:[[:space:]]*//;s/[[:space:]]*#.*//"; }
+# Echo a normalised, sorted, space-separated id list. Return 1 (do NOT filter) if the
+# list contains ANY non-id token — a malformed list must read as untrusted, not be
+# silently truncated into a different set.
+fm_idlist() {
+  raw=$(grep -m1 "^$2:" "$1" 2>/dev/null | sed "s/^$2:[[:space:]]*//;s/[[:space:]]*#.*//;s/[][,]/ /g")
+  out=""
+  for t in $raw; do
+    lt=$(printf '%s' "$t" | tr 'A-Z' 'a-z')
+    case "$lt" in [f][0-9]*) : ;; *) return 1 ;; esac
+    r=${lt#f}
+    case "$r" in ''|*[!0-9]*) return 1 ;; esac
+    out="$out$lt
+"
+  done
+  printf '%s' "$out" | sort -u | tr '\n' ' ' | sed 's/ *$//'
+}
+have_block() { grep -qE '^(unresolved|progress_continuity):' "$1"; }
+
+# Old-format responses (no block) => can't judge progress => count guard.
+{ have_block "$prev" && have_block "$curr"; } || emit insufficient-data 2
+
+# BOTH compared responses must assert continuity ok (a cycle-1 placeholder defaults to
+# unknown, so it correctly reads as insufficient-data).
+cont_a=$(fm_scalar "$prev" progress_continuity | tr 'A-Z' 'a-z')
+cont_b=$(fm_scalar "$curr" progress_continuity | tr 'A-Z' 'a-z')
+{ [ "$cont_a" = "ok" ] && [ "$cont_b" = "ok" ]; } || emit insufficient-data 2
+
+# Any malformed id list => untrusted => count guard.
+A_un=$(fm_idlist "$prev" unresolved)     || emit insufficient-data 2
+B_un=$(fm_idlist "$curr" unresolved)     || emit insufficient-data 2
+B_res=$(fm_idlist "$curr" resolved_since) || emit insufficient-data 2
+B_new=$(fm_idlist "$curr" new_this_cycle) || emit insufficient-data 2
+
+# set helpers operating on space-separated lowercased id lists
+count() { set -- $1; echo $#; }
+# elements in $1 not in $2
+minus() { for x in $1; do echo "$2" | tr ' ' '\n' | grep -qx "$x" || printf '%s ' "$x"; done; }
+# is every element of $1 present in $2 ?
+subset_of() { for x in $1; do echo "$2" | tr ' ' '\n' | grep -qx "$x" || return 1; done; return 0; }
+
+# --- Algebra check (cycle-2 #2 direction): explain every change with THIS response. ---
+removed=$(minus "$A_un" "$B_un"); removed=${removed% }
+added=$(minus "$B_un" "$A_un"); added=${added% }
+if ! subset_of "$removed" "$B_res" || ! subset_of "$added" "$B_new"; then
+  echo "(unexplained churn — removed:[$removed] added:[$added]; degrading to count guard)" >&2
+  emit insufficient-data 2
+fi
+
+# --- Net improvement = fewer unresolved OR improved approval rank. ---
+rank() { case "$(fm_scalar "$1" approval)" in
+  APPROVED) echo 2 ;; APPROVED_WITH_CONCERNS) echo 1 ;; BLOCKED) echo 0 ;; *) echo 0 ;; esac; }
+ca=$(count "$A_un"); cb=$(count "$B_un"); ra=$(rank "$prev"); rb=$(rank "$curr")
+
+if [ "$cb" -lt "$ca" ] || [ "$rb" -gt "$ra" ]; then
+  emit productive 0
+fi
+# continuity ok, algebra clean, no net improvement -> conservative early stop.
+emit impasse 3

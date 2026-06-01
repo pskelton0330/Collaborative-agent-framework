@@ -98,7 +98,8 @@ Keep this file **small**. Agents read/write it with their normal file tools.
     "max_review_cycles": 3,
     "max_escalation_cycles": 2,
     "idle_poll_seconds": 8,                // how often the watcher polls
-    "max_idle_seconds": 3600               // watcher returns "still idle" after this
+    "max_idle_seconds": 900                // watcher returns "still idle" after this
+                                           // (~15 min; a dead Secondary surfaces fast)
   },
 
   "human_required": false,                 // true => automation paused, await human
@@ -225,6 +226,11 @@ responded_at: 2026-05-28T14:41:10Z
 approval: APPROVED            # APPROVED | APPROVED_WITH_CONCERNS | BLOCKED
 risk: low                     # low | medium | high
 review_cycle: 1               # which cycle of this thread this answers
+unresolved:     [F1, F3]      # progress overlay (optional cycle 1; fill on re-audits)
+resolved_since: [F2]          # ids the Primary's last fix closed THIS cycle
+new_this_cycle: [F4]          # ids raised for the first time THIS cycle
+movement: true                # advisory only — NOT trusted by the gate
+progress_continuity: ok       # ok | unknown
 ---
 
 ## Findings
@@ -246,6 +252,34 @@ Why APPROVED / APPROVED_WITH_CONCERNS / BLOCKED.
 - `APPROVED_WITH_CONCERNS` — proceed allowed, but listed concerns should be
   weighed. The Primary may accept and move on **without** another review cycle.
 - `BLOCKED` — do not proceed. The response must list concrete blockers.
+
+**Progress overlay (the `unresolved`/`resolved_since`/`new_this_cycle`/`movement`/
+`progress_continuity` block).** This feeds the *tightening overlay* on the loop guard
+(§10) — a structured, machine-checkable signal of whether a re-audit actually moved.
+
+- **Finding ids** are short stable tokens (`F1`, `F2`, …). An id names **one concern
+  for the whole thread**. **Reuse the same id for the same concern across cycles** —
+  if the Primary attempts a fix and the Secondary still sees an equivalent problem,
+  it is **still that id in `unresolved`**, not a new one. This is what lets the
+  overlay tell real progress from churn that merely renames the same disagreement.
+- **`unresolved`** = ids still open after this review. **`resolved_since`** = ids the
+  Primary's last fix actually closed this cycle. **`new_this_cycle`** = ids raised for
+  the first time this cycle. Every change to the `unresolved` set across two cycles
+  must be explained: ids that left `unresolved` appear in this response's
+  `resolved_since`; ids that entered appear in its `new_this_cycle`.
+- **`progress_continuity`** is `ok` only when the Secondary is confident it has mapped
+  its ids to the prior cycle's. If it cannot (a restart with no memory, ambiguous
+  equivalence, missing prior ids), it MUST be `unknown` — which makes the overlay fall
+  back to the count backstop. **Uncertain identity must never read as progress.**
+- **`movement` is advisory only.** The verdict is computed mechanically from the set
+  diff + algebra by `check-progress`, never from this bit.
+- The block is **atomic and safe-by-default**: include all five fields or none (a
+  partial block is rejected at publish). Omitting it (cycle-1, old-format) degrades to
+  the count guard — backward compatible. The template default is
+  `progress_continuity: unknown`, which the overlay treats as untrusted; both compared
+  responses must assert `ok` for a `productive`/`impasse` verdict, and any malformed id
+  list also reads as `insufficient-data`. **Placeholder or malformed data never
+  produces a verdict.**
 
 ---
 
@@ -336,9 +370,31 @@ These are mandatory. The Primary enforces all of them.
 | Guard | Limit (default) | What happens when hit |
 |---|---|---|
 | Implementation retries | `max_retries` = 3 | Stop retrying; escalate (§9). |
-| Review cycles per thread | `max_review_cycles` = 3 | Stop re-auditing; accept `APPROVED_WITH_CONCERNS`, or escalate, or go human. |
+| Review cycles per thread | `max_review_cycles` = 3 (authoritative ceiling) | Stop re-auditing; accept `APPROVED_WITH_CONCERNS`, or escalate, or go human. |
+| Progress overlay | `check-progress` verdict | **Tightening only:** an `impasse` verdict makes the Primary stop *earlier* than the count (human handoff). It can never extend the loop. |
 | Escalation cycles per task | `max_escalation_cycles` = 2 | When `escalation_level` reaches the limit, hand off to human; `new-request` refuses further escalations. |
-| Idle wait | `max_idle_seconds` = 3600 | Watcher returns "still idle"; agent reports idle to its human instead of busy-spinning. |
+| Idle wait | `max_idle_seconds` = 900 | Watcher returns "still idle" (~15 min); agent reports idle to its human (and a stalled wait surfaces a dead Secondary) instead of busy-spinning. |
+
+**The progress overlay (tightening only).** Counting rounds can't tell real progress
+from spinning, and never catches frictionless fake agreement. So on each re-audit the
+Primary runs `check-progress <thread-root>`, which reads the two most recent responses
+in the thread and returns one verdict:
+
+- `productive` — net improvement (fewer `unresolved`, or an improved approval rank).
+  Continue (still under the count ceiling).
+- `impasse` — continuity `ok`, the set-algebra is clean, but there was **no** net
+  improvement. A deliberately **conservative early-stop heuristic** (a real fix paired
+  with an unrelated equal-size new finding can also trip it — not semantic certainty);
+  the Primary does the **human handoff now**, earlier than the count would.
+- `insufficient-data` — fewer than two responses, a missing/old-format block,
+  `progress_continuity: unknown`, or unexplained churn. The overlay can't be trusted,
+  so the **count backstop governs** (exactly v1.0 behavior).
+
+**Invariant: the overlay only ever stops the loop EARLIER, never later.** The count
+ceiling (`max_review_cycles`) stays authoritative and is never reset or extended by a
+`productive` verdict. A false `impasse` therefore costs only a (safe) early human
+check — it cannot let spinning run longer than v1.0. Without `jq`, `check-progress`
+returns `insufficient-data`, so safety never depends on the overlay.
 
 **Hard ownership constraints (never violated):**
 

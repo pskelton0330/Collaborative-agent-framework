@@ -96,6 +96,21 @@ If `status.json → state` is `human_required`, do nothing and stay idle.
    APPROVED_WITH_CONCERNS / BLOCKED), `risk` (low/medium/high), `review_cycle`,
    findings with severity and `file:line`, recommended fixes, risk assessment,
    approval rationale.
+
+   **On a re-audit, also fill the progress block** (`unresolved`, `resolved_since`,
+   `new_this_cycle`, `movement`, `progress_continuity`). It feeds the loop's progress
+   overlay (PROTOCOL §6/§10). The one rule that matters: **reuse a finding id (`F1`,
+   `F2`, …) for the SAME concern across the thread.** If you flagged `F1` last cycle
+   and the Primary's fix still leaves an equivalent problem, it is **still `F1` in
+   `unresolved`** — do NOT mint a new id for the same concern, or you will make
+   spinning look like progress. Put ids that the fix genuinely closed in
+   `resolved_since`, and only brand-new concerns in `new_this_cycle`. If you cannot
+   confidently map your ids to the prior cycle (e.g. you restarted with no memory and
+   the request didn't carry the prior ids), set `progress_continuity: unknown` — that
+   safely disables the overlay for this cycle. The block is **atomic**: fill all five
+   fields or delete all five (a partial block is rejected). The template default is
+   safe (`unknown`), so on cycle 1 you may simply leave it — only set
+   `progress_continuity: ok` once you have filled real ids and mapped them.
 5. Publish it:
 
    ```sh
