@@ -40,6 +40,7 @@ FRAMEWORK_DIR="$SANDBOX"; export FRAMEWORK_DIR
 SC="$SANDBOX/scripts"
 SH="$SANDBOX/shared"
 have_jq=0; command -v jq >/dev/null 2>&1 && have_jq=1
+[ -n "${AF_DISABLE_JQ:-}" ] && have_jq=0   # honour the same force-fallback switch as the scripts
 
 # --- jq-FREE state management (so the harness runs and sets up cases without jq) ---
 write_status() {

@@ -27,6 +27,10 @@ LOG="$SHARED/master-log.md"
 
 HAVE_JQ=0
 command -v jq >/dev/null 2>&1 && HAVE_JQ=1
+# Force the jq-free fallback path even when jq is installed — for exercising/debugging
+# the no-jq behaviour (the CI no-jq leg uses this, since jq can't be removed from a
+# read-only /usr/bin on macOS).
+[ -n "${AF_DISABLE_JQ:-}" ] && HAVE_JQ=0
 
 now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
