@@ -31,6 +31,11 @@ meaningful checkpoints, create review requests for the Secondary, incorporate it
 responses, track retries/escalations against the limits in `status.json`, and
 never loop without bound. Summarize outcomes to me as you go.
 
+While a review is pending, wait by re-running
+`agent-framework/scripts/watch --response <id> --max-idle 90` until it exits 0
+(exit 2 just means "not yet — run it again"; see PRIMARY_AGENT.md "How to create
+a request", step 4). Never ask me to tell you when the Secondary is done.
+
 Once I confirm the Secondary is ready, or tell you to proceed without one, begin
 this task:
 

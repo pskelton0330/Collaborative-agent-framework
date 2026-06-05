@@ -87,14 +87,23 @@ a half-written request.
    This validates the draft is filled in, atomically moves it to
    `shared/requests/<id>.md`, sets `state: request_pending`, `owner: secondary`,
    `active_request: <id>`, and logs `REQUEST`.
-4. Wait for the response. You can block efficiently:
+4. Wait for the response **by running the watcher in short chunks — never by
+   asking your human to tell you when the review is done.** Agent harnesses kill
+   long foreground commands (a 2-minute tool timeout is common), so a bare
+   `watch --response` can be killed mid-wait and look like a failure. It isn't.
+   The loop is:
 
    ```sh
-   agent-framework/scripts/watch --response "$id"
+   agent-framework/scripts/watch --response "$id" --max-idle 90
    ```
 
-   It returns when `shared/responses/<id>.response.md` appears (or times out per
-   `max_idle_seconds`, in which case check whether the Secondary is running).
+   - **Exit 0** — the response exists. Read it and proceed.
+   - **Exit 2** — no response *yet*. This is normal; run the same command again.
+     Keep a running total of time waited and only stop re-running when it
+     reaches `max_idle_seconds` (default 900s ≈ 10 chunks).
+   - **Total budget exhausted** — now (and only now) report to your human that
+     the Secondary appears to be down. That is the only review-related thing
+     you ever ask the human about mid-wait.
 
 ---
 

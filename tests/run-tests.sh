@@ -348,6 +348,35 @@ assert_eq "valid matching final unblocks (exit)" 0 "$rc"
 assert_eq "valid matching final unblocks (id)" "$want" "$out"
 
 # =====================================================================================
+echo "[11b] watch --max-idle per-call override (chunked waits)"
+reset_state
+set_num idle_poll_seconds 1; set_num max_idle_seconds 60
+want=REQ-20260601-210000-bug-risk
+printf -- '---\nrequest_id: %s\nreview_cycle: 1\nthread: null\n---\n' "$want" > "$SH/requests/$want.md"
+# the override shortens THIS call: exit 2 in ~1s, not status.json's 60s
+t0=$(date +%s)
+"$SC/watch" --response "$want" --max-idle 1 >/dev/null 2>&1; rc=$?
+t1=$(date +%s); el=$((t1 - t0))
+assert_eq "--max-idle 1 times out (exit 2)" 2 "$rc"
+if [ "$el" -le 15 ]; then ok "--max-idle overrides 60s limit (${el}s)"; else bad "--max-idle override ignored" "took ${el}s (status limit was 60s)"; fi
+# poll interval is clamped to the deadline: interval 8 with --max-idle 1 must not
+# sleep a full 8s chunk before noticing the deadline
+set_num idle_poll_seconds 8
+t0=$(date +%s)
+"$SC/watch" --response "$want" --max-idle 1 >/dev/null 2>&1; rc=$?
+t1=$(date +%s); el=$((t1 - t0))
+assert_eq "clamped interval still exits 2" 2 "$rc"
+if [ "$el" -le 5 ]; then ok "interval clamped to deadline (${el}s)"; else bad "interval not clamped" "took ${el}s (unclamped sleep would be 8s)"; fi
+# a ready response still unblocks immediately under a short --max-idle
+stage_response "$want" APPROVED 1; mv "$SH/responses/$want.response.md.tmp" "$SH/responses/$want.response.md"
+out=$("$SC/watch" --response "$want" --max-idle 1 2>/dev/null); rc=$?
+assert_eq "ready response unblocks under --max-idle (exit)" 0 "$rc"
+assert_eq "ready response unblocks under --max-idle (id)" "$want" "$out"
+# bad values are refused with a diagnostic
+refused "--max-idle rejects non-numeric" "positive integer" "$SC/watch" --max-idle abc
+refused "--max-idle rejects 0" "positive integer" "$SC/watch" --max-idle 0
+
+# =====================================================================================
 echo "[12] check-progress verdicts"
 reset_state
 R=REQ-20260601-100001-bug-risk; C=REQ-20260601-100002-bug-risk
