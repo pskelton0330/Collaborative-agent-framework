@@ -16,7 +16,7 @@
     "max_review_cycles": 3,
     "max_escalation_cycles": 2,
     "idle_poll_seconds": 8,
-    "max_idle_seconds": 3600
+    "max_idle_seconds": 900
   },
   "human_required": false,
   "notes": "Initial state. Primary owns the workflow; Secondary is idle until a request appears."

@@ -112,6 +112,30 @@ Read `shared/responses/<id>.response.md` and act on `approval`:
 Whenever you re-audit the same thread, **increment `cycle.review_cycles`** first
 and check it against `max_review_cycles`.
 
+**The progress overlay (run on every re-audit).** Counting rounds can't tell real
+progress from spinning. So before issuing a re-audit, after you have the latest
+response, run:
+
+```sh
+agent-framework/scripts/check-progress <thread-root-id>
+```
+
+- `productive` (exit 0) → the thread is improving; continue (still under the count
+  ceiling).
+- `impasse` (exit 3) → no net progress across the last two cycles; **do the human
+  handoff now** (§11) instead of re-auditing again. It is a deliberately conservative
+  early-stop — if you believe it's a false positive, that is exactly the call to put
+  to the human. The overlay only ever stops *earlier* than the count, never later.
+- `insufficient-data` (exit 2) → the signal can't be trusted (cycle 1, old-format
+  response, `progress_continuity: unknown`, or unexplained churn); fall back to the
+  **count backstop** (`max_review_cycles`) as in v1.0.
+
+**Carry continuity into each re-audit.** So the Secondary can keep finding-ids stable
+across a restart, copy the prior response's `unresolved` ids **and a one-line summary
+of each** into the new re-audit request (e.g. under a "Prior unresolved findings"
+heading). If you don't, the Secondary may have to set `progress_continuity: unknown`,
+which disables the overlay for that thread.
+
 ---
 
 ## Retry & escalation discipline

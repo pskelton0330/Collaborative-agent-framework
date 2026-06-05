@@ -1,0 +1,31 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  smoke:
+    name: smoke (${{ matrix.os }}, ${{ matrix.jq }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        jq: [with-jq, no-jq]
+    env:
+      # Force the scripts + harness onto the jq-free fallback path on the no-jq leg.
+      # (jq can't be removed on macOS — it lives in a read-only /usr/bin — so we toggle
+      # behaviour with this switch instead of deleting the binary.)
+      AF_DISABLE_JQ: ${{ matrix.jq == 'no-jq' && '1' || '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run smoke tests under /bin/sh
+        run: /bin/sh tests/run-tests.sh
+
+      - name: Run smoke tests under dash (Linux only)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update && sudo apt-get install -y dash
+          dash tests/run-tests.sh

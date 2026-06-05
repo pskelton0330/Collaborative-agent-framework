@@ -4,6 +4,16 @@ responded_at: YYYY-MM-DDTHH:MM:SSZ
 approval: APPROVED            # APPROVED | APPROVED_WITH_CONCERNS | BLOCKED
 risk: low                     # low | medium | high
 review_cycle: 1               # must match the request's review_cycle
+# --- progress overlay (PROTOCOL §6/§10). Fill on every re-audit. The default below is
+#     SAFE (continuity unknown => overlay disabled): only set `ok` once you've filled
+#     real ids and mapped them to the prior cycle. Ids are short stable tokens (F1, F2…);
+#     REUSE an id for the SAME concern across the thread — a still-open problem keeps its
+#     id even after a fix attempt. Either fill all five fields or delete all five. ---
+unresolved:     []            # finding ids you STILL consider open
+resolved_since: []            # ids the Primary's last fix actually closed this cycle
+new_this_cycle: []            # ids you are raising for the first time this cycle
+movement: false               # advisory only — did anything change vs the last cycle?
+progress_continuity: unknown  # set 'ok' ONLY when ids are filled & mapped to prior cycle
 reviewed_files:
   - path/to/file-a
   - path/to/file-b

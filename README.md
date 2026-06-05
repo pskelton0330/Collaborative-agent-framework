@@ -13,8 +13,11 @@ Everything coordinates through plain files in this folder.
 The two agents talk by dropping Markdown files into shared directories and
 updating one small JSON status file. **You normally only talk to the Primary.**
 
-> Status: a practical **v1**. It has been self-reviewed (docs + scripts) but has
-> limited real-world mileage — see **Safety & limits** before using it on
+> Status: **v1.1**. The review loop is now *self-regulating* (a progress overlay
+> stops a stuck thread early; see below) and the core invariants are mechanically
+> enforced. Built and reviewed *through the framework itself*, and covered by a
+> portable test suite (`tests/run-tests.sh`, run in CI on Linux + macOS, with and
+> without `jq`). Still young — see **Safety & limits** before trusting it with
 > something important.
 
 ---
@@ -30,6 +33,12 @@ updating one small JSON status file. **You normally only talk to the Primary.**
    re-audits. Retries, review cycles, and escalations are all **bounded** so the
    loop can't run forever; when limits are hit it hands off to you.
 
+On each re-audit the Primary also runs a **progress overlay**
+(`scripts/check-progress`): it compares the last two reviews and, if a thread is
+**spinning with no net progress**, stops it *early* and hands off to you — instead
+of burning the full cycle budget. The overlay can only ever stop the loop sooner,
+never extend it, so it makes the loop strictly safer, not looser.
+
 Every exchange is a readable file you can inspect, edit, or commit.
 
 ---
@@ -41,10 +50,13 @@ Every exchange is a readable file you can inspect, edit, or commit.
 - A **POSIX shell** (`/bin/sh`) and standard Unix tools: `grep`, `sed`, `awk`,
   `date`, `head`, `basename`, `dirname`, `mkdir`, `mv`, `rm`. Works on macOS
   (BSD userland) and Linux (GNU) — no GNU-only features are used.
-- **`jq` is optional.** With `jq` the helper scripts edit `status.json` atomically;
-  without it they fall back to a portable `grep` reader and print a notice. Safety
-  gates (`human_required`, the escalation limit) work either way. Installing `jq`
-  is recommended but not required.
+- **`jq` is optional but strongly recommended.** With `jq` the helper scripts edit
+  `status.json` atomically; without it they fall back to a portable `grep` reader,
+  print a notice, and rely on the agent to hand-edit `status.json` (more
+  error-prone). All safety gates (`human_required`, the escalation cap) and the
+  progress overlay work either way — the overlay simply returns `insufficient-data`
+  without `jq` and the count guard governs. Install `jq` unless you have a reason
+  not to.
 
 No network access is needed or used.
 
@@ -130,6 +142,8 @@ agent-framework/
   PRIMARY_AGENT.md           ← operating manual for the Primary Agent
   SECONDARY_AGENT.md         ← operating manual for the Secondary Agent
   EXAMPLE_WORKFLOW.md        ← worked examples + demo transcript + extension ideas
+  CHANGELOG.md               ← what changed between versions
+  CONTRIBUTING.md            ← how to run tests + the POSIX-sh rules for changes
 
   shared/                    ← all mutable coordination state lives here
     status.json              ← small machine-readable state (owner, state, counters, limits)
@@ -148,8 +162,12 @@ agent-framework/
     submit-request           ← validate a filled draft, then atomically publish it
     watch                    ← block until there's work (or a response), then return
     complete-request         ← validate + atomically publish a response
+    check-progress           ← productive / impasse / insufficient-data for a thread
     archive-request          ← move finished exchange(s) into archive/
     status                   ← pretty-print status.json + a work summary
+
+  tests/
+    run-tests.sh             ← portable smoke harness (run under /bin/sh and dash)
 ```
 
 ---
@@ -181,13 +199,15 @@ See [`PROTOCOL.md`](PROTOCOL.md) for the authoritative rules.
 **What to keep in mind:**
 - The **Primary is still an autonomous coding agent** editing your files and running
   commands — the framework adds a review net but doesn't remove that inherent risk.
-- The safety net is **soft**: it relies on the Primary following the protocol
-  (only the escalation cap is hard-enforced). A confused agent can skip a review or
-  proceed past a `BLOCKED`.
+- The safety net is **partly soft**: the escalation cap, single-active invariant,
+  response validation, and the progress overlay are mechanically enforced, but
+  whether the Primary *requests a review at the right moment* still depends on it
+  following the protocol. A confused agent can skip a review it should have asked
+  for, or proceed past a `BLOCKED`.
 - The Secondary's reviews are **fallible LLM reviews** — a useful second opinion,
   not a correctness guarantee.
-- This is a **v1 with limited real-world mileage.** Prove it on a low-stakes repo
-  first; keep a human gate on commits/pushes/deploys.
+- Still **young.** Prove it on a low-stakes repo first; keep a human gate on
+  commits/pushes/deploys.
 
 ---
 
@@ -199,6 +219,12 @@ If you copy `agent-framework/` into a project under version control, the include
 `*.response.md.tmp` staging files). If you also don't want the mutable
 `shared/status.json` and `shared/master-log.md` churning your history, add them to
 your project's ignore list too (noted at the bottom of `.gitignore`).
+
+**Framework not at the project root?** It doesn't have to live next to the code it
+reviews — the scripts resolve their own location (or honour a `FRAMEWORK_DIR` env
+override), and a request's `files:` list may use **absolute paths**. When the
+framework and the reviewed code are in different places, say so in the Secondary's
+startup prompt and list review targets by absolute path.
 
 ---
 

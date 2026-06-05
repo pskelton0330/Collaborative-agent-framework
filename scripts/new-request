@@ -45,11 +45,18 @@ esac
 if [ -n "$ID" ]; then
   valid_id "$ID" || { echo "Bad --id '$ID' (want REQ-YYYYMMDD-HHMMSS-<known-type>)." >&2; exit 2; }
   [ "${ID#REQ-????????-??????-}" = "$TYPE" ] || { echo "--id type suffix must match --type ($TYPE)." >&2; exit 2; }
+  # An explicit id is never silently mutated — a collision is the caller's mistake.
+  id_in_use "$ID" && { echo "Refusing: id '$ID' already exists (open or archived)." >&2; exit 1; }
 else
+  # Auto-generated ids are second-resolution, so two calls in the same second would
+  # collide. Roll forward to the next free second (POSIX-safe: recompute the timestamp
+  # after sleeping; no non-portable date arithmetic). Bounded by available seconds.
   ID="REQ-$(date -u +%Y%m%d-%H%M%S)-$TYPE"
+  while id_in_use "$ID"; do
+    sleep 1
+    ID="REQ-$(date -u +%Y%m%d-%H%M%S)-$TYPE"
+  done
 fi
-
-id_in_use "$ID" && { echo "Refusing: id '$ID' already exists (open or archived)." >&2; exit 1; }
 
 if [ "$TYPE" = "escalation" ]; then
   # Mechanical loop guard: do not allow more escalations than the protocol permits.
