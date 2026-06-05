@@ -372,9 +372,14 @@ stage_response "$want" APPROVED 1; mv "$SH/responses/$want.response.md.tmp" "$SH
 out=$("$SC/watch" --response "$want" --max-idle 1 2>/dev/null); rc=$?
 assert_eq "ready response unblocks under --max-idle (exit)" 0 "$rc"
 assert_eq "ready response unblocks under --max-idle (id)" "$want" "$out"
-# bad values are refused with a diagnostic
+# bad values are refused with a diagnostic. Leading zeros matter: 08/09 would
+# pass a naive digit check and then crash $(( )) as invalid octal once the
+# interval clamp copies them into INTERVAL; 00 is a zero timeout in disguise.
 refused "--max-idle rejects non-numeric" "positive integer" "$SC/watch" --max-idle abc
 refused "--max-idle rejects 0" "positive integer" "$SC/watch" --max-idle 0
+refused "--max-idle rejects 00" "positive integer" "$SC/watch" --max-idle 00
+refused "--max-idle rejects leading zero (octal trap)" "positive integer" "$SC/watch" --max-idle 08
+refused "--max-idle rejects out-of-range (>7 digits)" "positive integer" "$SC/watch" --max-idle 999999999999999999999
 
 # =====================================================================================
 echo "[12] check-progress verdicts"
@@ -423,8 +428,18 @@ if [ "$have_jq" -eq 1 ]; then
   assert_eq "unexplained churn -> insufficient-data" insufficient-data "$(cpv)"
   mkresp $C 2 BLOCKED "F1" "" "" unknown
   assert_eq "continuity unknown -> insufficient-data" insufficient-data "$(cpv)"
+  # v1.2 verdict split: rank-only improvement continues under the soft ceiling but
+  # must never extend past it (rank can oscillate; only a strict count decrease is
+  # well-founded), so it gets its own verdict.
   mkresp $R 1 BLOCKED "F1" "" "F1" ok; mkresp $C 2 APPROVED_WITH_CONCERNS "F1" "" "" ok
-  assert_eq "approval improved -> productive" productive "$(cpv)"
+  assert_eq "rank up, count flat -> productive-rank-only" productive-rank-only "$(cpv)"
+  # strict count decrease wins even if the approval rank got WORSE (well-founded
+  # metric governs extension eligibility)
+  mkresp $R 1 APPROVED_WITH_CONCERNS "F1, F2" "" "F1, F2" ok; mkresp $C 2 BLOCKED "F1" "F2" "" ok
+  assert_eq "count down, rank down -> productive" productive "$(cpv)"
+  # count down AND rank up is plain productive (count checked first)
+  mkresp $R 1 BLOCKED "F1, F2" "" "F1, F2" ok; mkresp $C 2 APPROVED_WITH_CONCERNS "F1" "F2" "" ok
+  assert_eq "count down, rank up -> productive" productive "$(cpv)"
   rm -f "$SH/responses/$C.response.md" "$SH/requests/$C.md"
   assert_eq "single response -> insufficient-data" insufficient-data "$(cpv)"
 else

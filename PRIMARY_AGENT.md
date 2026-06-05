@@ -100,7 +100,7 @@ a half-written request.
    - **Exit 0** — the response exists. Read it and proceed.
    - **Exit 2** — no response *yet*. This is normal; run the same command again.
      Keep a running total of time waited and only stop re-running when it
-     reaches `max_idle_seconds` (default 900s ≈ 10 chunks).
+     reaches `max_idle_seconds` (default 900s = 10 chunks of 90s).
    - **Total budget exhausted** — now (and only now) report to your human that
      the Secondary appears to be down. That is the only review-related thing
      you ever ask the human about mid-wait.
@@ -119,7 +119,7 @@ Read `shared/responses/<id>.response.md` and act on `approval`:
   - escalate if a limit is hit.
 
 Whenever you re-audit the same thread, **increment `cycle.review_cycles`** first
-and check it against `max_review_cycles`.
+and check it against the ceilings as described below.
 
 **The progress overlay (run on every re-audit).** Counting rounds can't tell real
 progress from spinning. So before issuing a re-audit, after you have the latest
@@ -129,15 +129,20 @@ response, run:
 agent-framework/scripts/check-progress <thread-root-id>
 ```
 
-- `productive` (exit 0) → the thread is improving; continue (still under the count
-  ceiling).
+- `productive` (exit 0) → the unresolved count strictly decreased. Continue. This is
+  the **only** verdict that lets you re-audit past the soft ceiling
+  (`max_review_cycles`) — re-check it every cycle, and never exceed
+  `max_review_cycles_hard` regardless of verdict.
+- `productive-rank-only` (exit 0) → the approval rank improved but the unresolved
+  count did not shrink. Continue **only while under the soft ceiling**; at or past
+  it, treat like hitting the ceiling (accept, escalate, or go human).
 - `impasse` (exit 3) → no net progress across the last two cycles; **do the human
   handoff now** (§11) instead of re-auditing again. It is a deliberately conservative
   early-stop — if you believe it's a false positive, that is exactly the call to put
-  to the human. The overlay only ever stops *earlier* than the count, never later.
+  to the human.
 - `insufficient-data` (exit 2) → the signal can't be trusted (cycle 1, old-format
   response, `progress_continuity: unknown`, or unexplained churn); fall back to the
-  **count backstop** (`max_review_cycles`) as in v1.0.
+  **soft count ceiling** (`max_review_cycles`) as in v1.0 — no extension.
 
 **Carry continuity into each re-audit.** So the Secondary can keep finding-ids stable
 across a restart, copy the prior response's `unresolved` ids **and a one-line summary
@@ -153,8 +158,12 @@ which disables the overlay for that thread.
   failure (tests fail again, same bug, same approach stalling).
 - At `retry_count >= max_retries`: **stop blind retrying.** Escalate to get an
   alternative approach (`PROTOCOL.md §9`).
-- At `review_cycles >= max_review_cycles`: stop re-auditing. Accept
-  `APPROVED_WITH_CONCERNS`, escalate, or hand off to the human.
+- At `review_cycles >= max_review_cycles`: stop re-auditing **unless** the latest
+  `check-progress` verdict is `productive` (strict unresolved-count decrease),
+  which buys exactly one more cycle at a time. At
+  `review_cycles >= max_review_cycles_hard`: stop unconditionally. Either way,
+  when stopped: accept `APPROVED_WITH_CONCERNS`, escalate, or hand off to the
+  human.
 - At `escalation_level >= max_escalation_cycles`: perform the **human handoff**
   (`PROTOCOL.md §11`) — set `human_required: true`, log a `HUMAN_REQUIRED`
   summary, stop automating, and ask the user.

@@ -2,6 +2,33 @@
 
 All notable changes to this framework are recorded here. Dates are UTC.
 
+## [Unreleased]
+
+### Added
+- **Adaptive review ceiling.** `max_review_cycles` (3) is now the *soft* ceiling:
+  a `productive` verdict from `check-progress` — meaning the `unresolved` count
+  **strictly decreased** — buys one more cycle at a time, up to the new absolute
+  `max_review_cycles_hard` (10). Termination stays guaranteed by arithmetic: a
+  non-negative count that must strictly shrink every extended round can only fund
+  finitely many rounds. Rank-only improvement gets the new verdict
+  `productive-rank-only` and continues **under the soft ceiling only** (approval
+  rank can oscillate, so it never extends). `insufficient-data` (including no-jq)
+  still means the soft ceiling governs — no extension when the overlay can't be
+  trusted. (PROTOCOL §9/§10, PRIMARY_AGENT, check-progress, status.json limits.)
+- **`watch --max-idle <secs>`** — per-call override of the idle timeout, so agents
+  can wait in short chunks that survive harness tool timeouts (exit 2 = "not yet,
+  re-run"); the poll interval is clamped to the deadline so short waits don't
+  overshoot. PRIMARY_AGENT step 4 makes the chunked wait loop **mandatory** and
+  forbids asking the human to announce review completion (the intermittent
+  "tell me when the Secondary is done" failure); the rule is also in the Primary
+  startup prompt.
+
+### Changed
+- The v1.1 "tightening only" overlay invariant is restated for the adaptive
+  ceiling: the overlay may stop the loop earlier than the soft ceiling, and may
+  extend it **only** along a strictly-decreasing unresolved count, never past
+  `max_review_cycles_hard`.
+
 ## [1.1.0] — 2026-06-01
 
 Hardening release: makes the review loop **self-regulating** and turns several

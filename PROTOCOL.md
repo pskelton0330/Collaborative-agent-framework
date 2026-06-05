@@ -95,7 +95,8 @@ Keep this file **small**. Agents read/write it with their normal file tools.
 
   "limits": {                              // stop conditions (tune per project)
     "max_retries": 3,
-    "max_review_cycles": 3,
+    "max_review_cycles": 3,                // SOFT review ceiling (governs unless extended, §10)
+    "max_review_cycles_hard": 10,          // ABSOLUTE review ceiling; nothing extends past it
     "max_escalation_cycles": 2,
     "idle_poll_seconds": 8,                // how often the watcher polls
     "max_idle_seconds": 900                // watcher returns "still idle" after this
@@ -336,7 +337,8 @@ review thread keeps failing.
 **Triggers (any one):**
 
 - `retry_count >= max_retries` (stuck implementing).
-- `review_cycles >= max_review_cycles` (audit thread won't converge).
+- The review loop stopped without approval — the **effective ceiling** (§10) was
+  reached: the soft ceiling with no extension in force, or the hard ceiling.
 - The Secondary returned `BLOCKED` on the same concern across two consecutive
   cycles.
 - A `pre-commit` review came back `BLOCKED`.
@@ -370,31 +372,48 @@ These are mandatory. The Primary enforces all of them.
 | Guard | Limit (default) | What happens when hit |
 |---|---|---|
 | Implementation retries | `max_retries` = 3 | Stop retrying; escalate (§9). |
-| Review cycles per thread | `max_review_cycles` = 3 (authoritative ceiling) | Stop re-auditing; accept `APPROVED_WITH_CONCERNS`, or escalate, or go human. |
-| Progress overlay | `check-progress` verdict | **Tightening only:** an `impasse` verdict makes the Primary stop *earlier* than the count (human handoff). It can never extend the loop. |
+| Review cycles per thread (soft) | `max_review_cycles` = 3 | Stop re-auditing — **unless** the latest `check-progress` verdict is `productive` (strict count decrease), which permits one more cycle, re-checked every cycle. |
+| Review cycles per thread (hard) | `max_review_cycles_hard` = 10 | Absolute ceiling. Stop re-auditing no matter what the overlay says; accept `APPROVED_WITH_CONCERNS`, escalate, or go human. |
+| Progress overlay | `check-progress` verdict | `impasse` stops the loop *earlier* than the soft ceiling (human handoff). `productive` extends it past the soft ceiling, bounded by the hard ceiling and by arithmetic (below). |
 | Escalation cycles per task | `max_escalation_cycles` = 2 | When `escalation_level` reaches the limit, hand off to human; `new-request` refuses further escalations. |
 | Idle wait | `max_idle_seconds` = 900 | Watcher returns "still idle" (~15 min); agent reports idle to its human (and a stalled wait surfaces a dead Secondary) instead of busy-spinning. |
 
-**The progress overlay (tightening only).** Counting rounds can't tell real progress
+**The progress overlay (adaptive ceiling).** Counting rounds can't tell real progress
 from spinning, and never catches frictionless fake agreement. So on each re-audit the
 Primary runs `check-progress <thread-root>`, which reads the two most recent responses
 in the thread and returns one verdict:
 
-- `productive` — net improvement (fewer `unresolved`, or an improved approval rank).
-  Continue (still under the count ceiling).
+- `productive` — the `unresolved` count **strictly decreased**. Continue; past the
+  soft ceiling this is the *only* verdict that permits the next cycle (up to the
+  hard ceiling).
+- `productive-rank-only` — no count decrease, but the approval rank improved
+  (e.g. `BLOCKED` → `APPROVED_WITH_CONCERNS`). Continue **under the soft ceiling
+  only** — rank can oscillate, so it never extends the loop.
 - `impasse` — continuity `ok`, the set-algebra is clean, but there was **no** net
   improvement. A deliberately **conservative early-stop heuristic** (a real fix paired
   with an unrelated equal-size new finding can also trip it — not semantic certainty);
   the Primary does the **human handoff now**, earlier than the count would.
 - `insufficient-data` — fewer than two responses, a missing/old-format block,
   `progress_continuity: unknown`, or unexplained churn. The overlay can't be trusted,
-  so the **count backstop governs** (exactly v1.0 behavior).
+  so the **soft count ceiling governs** (exactly v1.0 behavior — no extension).
 
-**Invariant: the overlay only ever stops the loop EARLIER, never later.** The count
-ceiling (`max_review_cycles`) stays authoritative and is never reset or extended by a
-`productive` verdict. A false `impasse` therefore costs only a (safe) early human
-check — it cannot let spinning run longer than v1.0. Without `jq`, `check-progress`
-returns `insufficient-data`, so safety never depends on the overlay.
+**Why extension is safe (termination is arithmetic, not heuristic).** The extension
+signal is **well-founded**: the unresolved count is a non-negative integer that must
+strictly decrease on *every* extended cycle, so a thread that hits the soft ceiling
+with N unresolved findings can extend at most N more cycles before the count hits 0
+(review complete) or stalls (verdict ≠ `productive` → stop). A fooled detector can
+only end the loop *early* (fabricated resolutions drive the count to 0 — the
+fake-agreement failure mode, which the old fixed ceiling never protected against
+either); it cannot make the loop run unboundedly. `max_review_cycles_hard` is
+defense-in-depth on top of the proof, and the **effective ceiling** referenced in §9
+is: the soft ceiling when no `productive` extension is in force, else the hard
+ceiling.
+
+**Invariant (v1.2 restatement).** The overlay may stop the loop earlier than the soft
+ceiling (`impasse`), and may extend it **only** along a strictly-decreasing unresolved
+count, never past `max_review_cycles_hard`. Whenever the overlay cannot be trusted
+(`insufficient-data`, including the no-`jq` case), the soft ceiling governs and no
+extension is possible — so safety never depends on the overlay.
 
 **Hard ownership constraints (never violated):**
 
