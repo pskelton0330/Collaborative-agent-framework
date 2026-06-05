@@ -2,7 +2,7 @@
 
 All notable changes to this framework are recorded here. Dates are UTC.
 
-## [Unreleased]
+## [1.2.0] — 2026-06-05
 
 ### Added
 - **Adaptive review ceiling.** `max_review_cycles` (3) is now the *soft* ceiling:
