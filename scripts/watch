@@ -6,27 +6,46 @@
 #                              response). Prints the id(s), exit 0.
 #   watch --response <id>      Primary mode: wait until the response for <id>
 #                              exists. Prints <id>, exit 0.
+#   watch --max-idle <secs>    Override the idle timeout for THIS call only.
+#                              Agent harnesses kill long foreground commands
+#                              (e.g. a 2-minute tool timeout), so agents should
+#                              wait in short chunks (e.g. --max-idle 90) and
+#                              re-run on exit 2 until the TOTAL wait reaches
+#                              status.json's max_idle_seconds.
 #
 # Exit codes: 0 = work found (ids printed) | 2 = idle timeout reached |
 #             3 = paused (status.human_required is set; Secondary mode only).
-# Poll interval and idle timeout come from status.json limits (defaults 8/3600).
+# Poll interval and idle timeout come from status.json limits (defaults 8/900);
+# --max-idle overrides the timeout per call.
 set -eu
 . "$(cd "$(dirname "$0")" && pwd)/_common.sh"
 
-MODE="any"; WANT_ID=""
+MODE="any"; WANT_ID=""; IDLE_OVERRIDE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --response) MODE="response"; WANT_ID=${2:-}; shift 2 ;;
-    -h|--help) echo "Usage: watch [--response <request-id>]" >&2; exit 2 ;;
+    --max-idle) IDLE_OVERRIDE=${2:-}; shift 2 ;;
+    -h|--help) echo "Usage: watch [--response <request-id>] [--max-idle <seconds>]" >&2; exit 2 ;;
     *) echo "Unknown arg: $1" >&2; exit 2 ;;
   esac
 done
 [ "$MODE" = "response" ] && [ -z "$WANT_ID" ] && { echo "--response needs an id" >&2; exit 2; }
+# Reject non-digits, anything starting with 0 (leading zeros read as octal in
+# $(( )) and 08/09 crash it; 00 is a zero timeout), and >7 digits (out-of-range
+# values break the [ -ge ] deadline test and the timeout never fires).
+case "$IDLE_OVERRIDE" in
+  '') : ;;
+  *[!0-9]*|0*|????????*) echo "--max-idle needs a positive integer, 1-9999999 (seconds)" >&2; exit 2 ;;
+esac
 
 INTERVAL=$(json_get '.limits.idle_poll_seconds' 8)
 MAX_IDLE=$(json_get '.limits.max_idle_seconds' 900)
 case "$INTERVAL" in *[!0-9]*|'') INTERVAL=8 ;; esac
 case "$MAX_IDLE" in *[!0-9]*|'') MAX_IDLE=900 ;; esac
+[ -n "$IDLE_OVERRIDE" ] && MAX_IDLE=$IDLE_OVERRIDE
+# Never sleep past the deadline in one chunk (e.g. --max-idle 5 with the default
+# 8s poll would otherwise overshoot to 8s).
+[ "$INTERVAL" -gt "$MAX_IDLE" ] && INTERVAL=$MAX_IDLE
 
 unprocessed() {
   out=""

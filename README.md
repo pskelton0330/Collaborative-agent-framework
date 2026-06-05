@@ -34,10 +34,14 @@ updating one small JSON status file. **You normally only talk to the Primary.**
    loop can't run forever; when limits are hit it hands off to you.
 
 On each re-audit the Primary also runs a **progress overlay**
-(`scripts/check-progress`): it compares the last two reviews and, if a thread is
-**spinning with no net progress**, stops it *early* and hands off to you — instead
-of burning the full cycle budget. The overlay can only ever stop the loop sooner,
-never extend it, so it makes the loop strictly safer, not looser.
+(`scripts/check-progress`): it compares the last two reviews. If a thread is
+**spinning with no net progress**, it stops it *early* and hands off to you —
+instead of burning the full cycle budget. If the thread is **measurably
+converging** (the unresolved-finding count strictly shrinks every round), it may
+continue past the soft cycle budget, bounded by a hard ceiling *and* by
+arithmetic: a count that must strictly decrease can only fund as many extra
+rounds as there are findings left. Whenever the overlay can't be trusted, the
+plain cycle budget governs.
 
 Every exchange is a readable file you can inspect, edit, or commit.
 
@@ -162,7 +166,7 @@ agent-framework/
     submit-request           ← validate a filled draft, then atomically publish it
     watch                    ← block until there's work (or a response), then return
     complete-request         ← validate + atomically publish a response
-    check-progress           ← productive / impasse / insufficient-data for a thread
+    check-progress           ← productive / productive-rank-only / impasse / insufficient-data
     archive-request          ← move finished exchange(s) into archive/
     status                   ← pretty-print status.json + a work summary
 

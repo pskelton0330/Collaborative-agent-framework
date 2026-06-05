@@ -2,20 +2,29 @@
 # Progress overlay for a review thread (PROTOCOL §10). Reads the two most recent
 # responses in a thread and prints exactly one verdict on stdout:
 #
-#   productive          there was net improvement (fewer unresolved OR better approval)
+#   productive          the unresolved count STRICTLY DECREASED — the well-founded
+#                       signal; may extend the loop past the soft ceiling (§10)
+#   productive-rank-only  no count decrease, but the approval rank improved —
+#                       continue under the SOFT ceiling only, never past it
 #   impasse             continuity ok, algebra clean, but NO net improvement
 #   insufficient-data   <2 responses, missing progress block, continuity unknown,
 #                       or unexplained churn (the signal can't be trusted)
 #
-# This is a TIGHTENING OVERLAY: it can make the Primary stop EARLIER than the count
-# guard (`max_review_cycles`), never later. `impasse` is a deliberately conservative
-# early-stop heuristic (a real fix plus an unrelated equal-size new finding can also
-# trip it) — safe by construction because the count guard remains authoritative and
-# the overlay never extends the loop. The Primary acts on the verdict (PRIMARY_AGENT).
+# v1.2 ADAPTIVE CEILING: a `productive` verdict lets the Primary continue past the
+# soft count ceiling (`max_review_cycles`) up to the absolute hard ceiling
+# (`max_review_cycles_hard`). This is safe because the extension signal is
+# WELL-FOUNDED: the unresolved count is a non-negative integer that must strictly
+# decrease every extended round, so a thread extends at most <count> more rounds —
+# termination is arithmetic, not heuristic. Approval rank is NOT well-founded (it
+# can oscillate BLOCKED<->CONCERNS indefinitely), which is exactly why a rank-only
+# improvement gets its own verdict and never extends. Whenever the overlay cannot
+# be trusted (`insufficient-data`), the soft count ceiling governs, as in v1.0/v1.1.
+# `impasse` remains a deliberately conservative early stop (a real fix plus an
+# unrelated equal-size new finding can also trip it).
 #
-# Exit codes: 0 productive | 2 insufficient-data | 3 impasse | 1 usage/error.
-# Requires jq for the structured read; without jq it prints insufficient-data (the
-# count guard then governs) so safety never depends on the overlay.
+# Exit codes: 0 productive/productive-rank-only | 2 insufficient-data | 3 impasse |
+# 1 usage/error. Requires jq for the structured read; without jq it prints
+# insufficient-data (the count guard then governs) so safety never depends on it.
 set -eu
 . "$(cd "$(dirname "$0")" && pwd)/_common.sh"
 
@@ -120,13 +129,19 @@ if ! subset_of "$removed" "$B_res" || ! subset_of "$added" "$B_new"; then
   emit insufficient-data 2
 fi
 
-# --- Net improvement = fewer unresolved OR improved approval rank. ---
+# --- Net improvement, split by extension eligibility (v1.2). ---
+# A strict count decrease is the only signal allowed to extend past the soft
+# ceiling (well-founded => provably terminating). Rank improvement alone still
+# means "continue under the soft ceiling" but can oscillate, so it never extends.
 rank() { case "$(fm_scalar "$1" approval)" in
   APPROVED) echo 2 ;; APPROVED_WITH_CONCERNS) echo 1 ;; BLOCKED) echo 0 ;; *) echo 0 ;; esac; }
 ca=$(count "$A_un"); cb=$(count "$B_un"); ra=$(rank "$prev"); rb=$(rank "$curr")
 
-if [ "$cb" -lt "$ca" ] || [ "$rb" -gt "$ra" ]; then
+if [ "$cb" -lt "$ca" ]; then
   emit productive 0
+fi
+if [ "$rb" -gt "$ra" ]; then
+  emit productive-rank-only 0
 fi
 # continuity ok, algebra clean, no net improvement -> conservative early stop.
 emit impasse 3
