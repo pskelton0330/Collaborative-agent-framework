@@ -278,7 +278,8 @@ Why APPROVED / APPROVED_WITH_CONCERNS / BLOCKED.
   partial block is rejected at publish). Omitting it (cycle-1, old-format) degrades to
   the count guard — backward compatible. The template default is
   `progress_continuity: unknown`, which the overlay treats as untrusted; both compared
-  responses must assert `ok` for a `productive`/`impasse` verdict, and any malformed id
+  responses must assert `ok` for a `productive`/`productive-rank-only`/`impasse`
+verdict, and any malformed id
   list also reads as `insufficient-data`. **Placeholder or malformed data never
   produces a verdict.**
 
