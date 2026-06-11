@@ -7,8 +7,14 @@
 #
 #   secondary-loop [--provider codex|claude] [--model M] [--idle SECS] [--once]
 # Run it in the background (e.g. `nohup scripts/secondary-loop &`) next to your
-# Primary. Stop: `touch shared/.stop-secondary` (graceful) or Ctrl-C. Exits 3 if the
-# system is paused (status.human_required). --once handles a single request (testing).
+# Primary. Stop: `touch shared/.stop-secondary` (graceful) or Ctrl-C — noticed within
+# the loop's idle window. Exits 3 if the system is paused (status.human_required).
+# --once handles a single request (testing).
+#   --idle SECS  How long one idle wait blocks before the loop re-checks the stop
+#                sentinel. Defaults to min(120, status.max_idle_seconds), deliberately
+#                decoupled from max_idle_seconds (the Primary's much longer
+#                dead-Secondary patience budget) so a graceful stop is noticed
+#                promptly. Does NOT change how fast real requests are picked up.
 set -eu
 . "$(cd "$(dirname "$0")" && pwd)/_common.sh"
 
@@ -43,6 +49,24 @@ STOP="$SHARED/.stop-secondary"
 INTERVAL=$(json_get '.limits.idle_poll_seconds' 8); case "$INTERVAL" in *[!0-9]*|'') INTERVAL=8 ;; esac
 fails=0; last_fail=""
 
+# Decouple the loop's stop-check cadence from status.max_idle_seconds. That limit is
+# the PRIMARY's patience budget before it declares the Secondary dead — deliberately
+# generous (default 900s). If the loop inherited it as its OWN idle window, a graceful
+# stop (.stop-secondary) would not be noticed until that whole window elapsed (the stop
+# sentinel is only re-checked between watch calls). So when --idle isn't given, cap the
+# loop's idle at STOP_POLL: the sentinel is checked at least that often, with NO effect
+# on how fast real requests are picked up (watch returns the instant work appears) and
+# none on the Primary's budget. An explicit --idle still wins.
+STOP_POLL=120
+if [ -n "$IDLE" ]; then
+  EFFECTIVE_IDLE=$IDLE
+else
+  _mi=$(json_get '.limits.max_idle_seconds' 900); case "$_mi" in *[!0-9]*|'') _mi=900 ;; esac
+  if [ "$_mi" -lt 1 ]; then EFFECTIVE_IDLE=$STOP_POLL
+  elif [ "$_mi" -lt "$STOP_POLL" ]; then EFFECTIVE_IDLE=$_mi
+  else EFFECTIVE_IDLE=$STOP_POLL; fi
+fi
+
 # print lines of a markdown '## Section' (until the next '## '), capped
 section() { awk -v h="$1" 'index($0,h)==1{f=1;next} f&&/^## /{f=0} f{print}' "$2" | sed '/^$/d' | head -8; }
 files_of() { awk '/^files:/{f=1;next} f&&/^[[:space:]]*-[[:space:]]*/{sub(/^[[:space:]]*-[[:space:]]*/,"");printf "%s ",$0;next} f&&/^[^[:space:]]/{f=0}' "$1"; }
@@ -68,10 +92,10 @@ append_transcript() {
   } >> "$CONV"
 }
 
-echo "secondary-loop: watching with provider=$PROVIDER. stop with: touch $STOP" >&2
+echo "secondary-loop: watching with provider=$PROVIDER (idle window ${EFFECTIVE_IDLE}s). stop with: touch $STOP" >&2
 while : ; do
   if [ -e "$STOP" ]; then rm -f "$STOP"; echo "secondary-loop: stop sentinel seen — exiting." >&2; exit 0; fi
-  if [ -n "$IDLE" ]; then set -- --max-idle "$IDLE"; else set -- ; fi
+  set -- --max-idle "$EFFECTIVE_IDLE"
   ids=$("$FRAMEWORK_DIR/scripts/watch" "$@" 2>/dev/null) && rc=0 || rc=$?
   case "$rc" in
     0)

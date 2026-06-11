@@ -581,6 +581,16 @@ assert_eq "secondary-loop --once handled a request (exit 0)" 0 "$rc"
 assert_eq "headless secondary published a response" 1 "$([ -f "$SH/responses/$hid.response.md" ] && echo 1 || echo 0)"
 assert_eq "conversation transcript captured the exchange" 1 "$([ -f "$SH/conversation.md" ] && grep -q "$hid" "$SH/conversation.md" && echo 1 || echo 0)"
 
+# Default idle window is decoupled from (capped at 120s below) max_idle_seconds, so a
+# graceful stop is noticed promptly even though the Primary's patience budget is 900s.
+# A request is pending, so watch returns at once (fast test); we assert the startup line
+# reports the capped 120s window rather than inheriting 900s.
+reset_state
+hidc=$("$SC/new-request" --type bug-risk --files a 2>/dev/null); fill_draft "$SH/requests/$hidc.md.draft"; "$SC/submit-request" "$hidc" >/dev/null 2>&1
+out=$(SECONDARY_AGENT_CMD="$stub" "$SC/secondary-loop" --once 2>&1); rc=$?
+assert_eq "secondary-loop default (no --idle) handles a request" 0 "$rc"
+assert_eq "default idle window capped at 120s (decoupled from max_idle=900)" 1 "$(printf '%s' "$out" | grep -qF 'idle window 120s' && echo 1 || echo 0)"
+
 reset_state
 SECONDARY_AGENT_CMD="$stub" "$SC/secondary-loop" --once --idle 1 >/dev/null 2>&1; assert_eq "secondary-loop --once idle exits 0" 0 "$?"
 

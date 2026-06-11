@@ -48,6 +48,17 @@ All notable changes to this framework are recorded here. Dates are UTC.
   the design rule that keeps the sabotage incentive from existing.
 
 ### Fixed
+- **`secondary-loop` graceful-stop latency decoupled from the Primary's patience
+  budget.** The persistent watcher only re-checks the `.stop-secondary` sentinel
+  between `watch` calls, but a `--idle`-less loop inherited `status.max_idle_seconds`
+  (default **900s**) as its idle window — so a graceful stop (or a dead-Secondary
+  cleanup) could take up to ~15 min to take effect. `max_idle_seconds` is overloaded:
+  it is also the Primary's *much longer* "declare the Secondary dead" budget, which
+  must stay above the slowest legitimate review, so it can't simply be lowered. The
+  loop now defaults its own idle window to `min(120, max_idle_seconds)` (explicit
+  `--idle` still wins), so the sentinel is checked within ~2 min regardless of the
+  Primary budget — with **no** effect on request pickup latency (`watch` returns the
+  instant work appears). Startup line now reports the active idle window; +1 test.
 - README status line corrected from v1.1 to **v1.2** (the adaptive review ceiling
   shipped in 1.2.0 but the front-page status still read 1.1).
 
