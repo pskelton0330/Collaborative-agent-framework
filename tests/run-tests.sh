@@ -535,6 +535,24 @@ B.
 EOF
 "$SC/plan" archive "$pid" >/dev/null 2>&1; assert_eq "archive moves a filled plan" 0 "$?"
 assert_eq "plan archived" 1 "$([ -d "$SH/plans/archive/$pid" ] && echo 1 || echo 0)"
+# filled() must ignore back-ticked angle-bracket prose (regression for the <id>
+# false positive; this draft has a back-ticked `PLAN <id>` but no real placeholder)
+bpid=$("$SC/plan" new "backtick filled regression" 2>/dev/null); bpd="$SH/plans/$bpid"
+cat > "$bpd/primary-draft.md" <<'EOF'
+---
+plan_id: PLAN-00000000-000000
+author: primary
+drafted_at: 2026-06-11T00:00:00Z
+verdict: READY_TO_BUILD
+---
+## Approach
+The watcher prints a line like `PLAN <id>` for routing.
+## Key risks
+None.
+## Open questions
+None.
+EOF
+"$SC/plan" seal "$bpid" >/dev/null 2>&1; assert_eq "seal accepts back-ticked <id> prose (filled fix)" 0 "$?"
 
 echo
 echo "================ $PASS passed, $FAIL failed ================"

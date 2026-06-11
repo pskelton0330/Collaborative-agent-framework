@@ -35,7 +35,10 @@ valid_plan_id() {
 pdir() { printf '%s/%s' "$PLANS" "$1"; }
 need_dir() { [ -d "$(pdir "$1")" ] || { echo "no such plan: $1" >&2; exit 1; }; }
 # A draft/problem is "filled" if it no longer contains its angle-bracket placeholders.
-filled() { [ -f "$1" ] && ! grep -q '<[A-Za-z]' "$1"; }
+# Back-ticked code spans are stripped first, so legitimate prose like `REQUEST <id>`
+# does not read as an unfilled placeholder (the template's placeholders are not
+# back-ticked, so they are still caught).
+filled() { [ -f "$1" ] && ! sed 's/`[^`]*`//g' "$1" | grep -q '<[A-Za-z]'; }
 
 set_state() { # <state> <active_plan-or-null>
   if [ "$HAVE_JQ" -eq 1 ]; then
