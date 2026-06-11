@@ -155,6 +155,12 @@ touch shared/.stop-secondary
   (which runs `codex exec` or `claude -p` headless), then appends the exchange —
   request summary + the Secondary's verdict, findings, and rationale — to
   `shared/conversation.md` (a readable companion to the terse `master-log.md`).
+- **Fully unattended (no permission prompts) by design** — a prompt would hang the
+  loop. Codex runs with `approval_policy=never` + `-s workspace-write` (reads
+  anywhere, writes *only* the response under the framework dir); Claude runs with
+  `--dangerously-skip-permissions`. This is low-risk because the Secondary is a
+  **read-only reviewer**: it only reads, writes its one response file, and runs
+  `complete-request` — it never edits your project code.
 - **Provider-agnostic / either direction:** Claude-Primary + Codex-Secondary, or
   Codex-Primary + Claude-Secondary — roles are not tied to models.
 - This reproduces the two-terminal *auto-detection* ergonomic headlessly. (It does

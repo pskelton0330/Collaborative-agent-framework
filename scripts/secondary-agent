@@ -36,16 +36,20 @@ Do not edit the reviewed files. Print your verdict (approval + risk) when done."
 case "$PROVIDER" in
   codex)
     command -v codex >/dev/null 2>&1 || { echo "codex not found on PATH" >&2; exit 127; }
+    # Fully automatic — never prompt. `approval_policy=never` guarantees no approval
+    # pauses (a prompt would hang the headless loop); `-s workspace-write` keeps the
+    # review bot able to read anywhere + write only the response under the framework
+    # dir — it cannot write into your project, which matches its read-only-reviewer role.
     if [ -n "$MODEL" ]; then
-      printf '%s' "$PROMPT" | codex exec --skip-git-repo-check -s workspace-write -C "$FRAMEWORK_DIR" -m "$MODEL" -
+      printf '%s' "$PROMPT" | codex exec --skip-git-repo-check -s workspace-write -c approval_policy=never -C "$FRAMEWORK_DIR" -m "$MODEL" -
     else
-      printf '%s' "$PROMPT" | codex exec --skip-git-repo-check -s workspace-write -C "$FRAMEWORK_DIR" -
+      printf '%s' "$PROMPT" | codex exec --skip-git-repo-check -s workspace-write -c approval_policy=never -C "$FRAMEWORK_DIR" -
     fi
     ;;
   claude)
     command -v claude >/dev/null 2>&1 || { echo "claude not found on PATH" >&2; exit 127; }
-    # Local controlled Secondary: it only reads, writes one response file, and runs
-    # complete-request, so it runs unattended with permissions bypassed.
+    # Fully automatic — the Secondary only reads, writes one response file, and runs
+    # complete-request, so it runs unattended with permissions skipped (no prompts).
     if [ -n "$MODEL" ]; then
       ( cd "$FRAMEWORK_DIR" && claude -p "$PROMPT" --dangerously-skip-permissions --model "$MODEL" )
     else
