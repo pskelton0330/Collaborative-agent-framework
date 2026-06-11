@@ -1,7 +1,8 @@
 # Runtime coordination artifacts — generated while the framework runs.
-# The empty folder structure (.gitkeep) and the pristine seeds
-# (shared/status.json, shared/master-log.md) ARE committed; the live
-# request/response/escalation/archive content is not.
+# Committed: the empty folder structure (.gitkeep) and the pristine SEEDS
+# (shared/status.seed.json, shared/master-log.seed.md). NOT committed: the live
+# status.json / master-log.md (seeded from those on first use) and the live
+# request/response/escalation/archive content.
 shared/requests/*
 shared/responses/*
 shared/escalation/*
@@ -16,15 +17,16 @@ shared/plans/*
 # Staging / temp files (atomic-write intermediates)
 *.draft
 *.response.md.tmp
-shared/status.json.tmp.*
+shared/*.tmp.*
 
 # OS cruft
 .DS_Store
 
-# If you embed this folder inside another project's repo, you may also want to
-# ignore the mutable shared state so it doesn't churn your project's history:
-#   shared/status.json
-#   shared/master-log.md
+# Live runtime state — seeded from shared/*.seed.* on first use (scripts/_common.sh),
+# then mutated by real runs. Gitignored so real use can never dirty the repo or leak a
+# task label / project path into history.
+shared/status.json
+shared/master-log.md
 
 # Headless secondary runtime
 shared/conversation.md

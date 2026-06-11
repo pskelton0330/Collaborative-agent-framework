@@ -25,6 +25,14 @@ TEMPLATES="$FRAMEWORK_DIR/templates"
 STATUS="$SHARED/status.json"
 LOG="$SHARED/master-log.md"
 
+# The live status.json / master-log.md are runtime state (gitignored), so real use
+# never dirties the repo. On first use (e.g. a fresh clone), initialize them from the
+# committed pristine seeds. Cheap no-op once they exist.
+# Atomic (temp + mv in the same dir) so a concurrent first-use never reads a
+# half-copied file; absent seed degrades silently to json_get defaults.
+[ -f "$STATUS" ] || { [ -f "$SHARED/status.seed.json" ] && cp "$SHARED/status.seed.json" "$STATUS.tmp.$$" && mv "$STATUS.tmp.$$" "$STATUS"; }
+[ -f "$LOG" ]    || { [ -f "$SHARED/master-log.seed.md" ] && cp "$SHARED/master-log.seed.md" "$LOG.tmp.$$" && mv "$LOG.tmp.$$" "$LOG"; }
+
 HAVE_JQ=0
 command -v jq >/dev/null 2>&1 && HAVE_JQ=1
 # Force the jq-free fallback path even when jq is installed — for exercising/debugging

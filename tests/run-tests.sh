@@ -44,15 +44,15 @@ have_jq=0; command -v jq >/dev/null 2>&1 && have_jq=1
 
 # --- jq-FREE state management (so the harness runs and sets up cases without jq) ---
 write_status() {
-  # Use the real pristine seed: it is the canonical ONE-KEY-PER-LINE format the
-  # scripts' no-jq json_get and the set_* seds below both depend on (a compacted
-  # cycle/limits block would make the grep fallback parse "2 }" instead of "2"). Copying
-  # the seed also keeps the harness in sync with the shipped defaults.
-  cp "$SRC/shared/status.json" "$SH/status.json"
-  # HERMETIC: the seed is also the framework's LIVE status.json, which real use mutates
-  # (e.g. leaves cycle.review_cycles > 0). Normalize the volatile runtime fields back to
-  # defaults so the suite's outcome never depends on prior framework use. (set_* are
-  # defined just below; sh resolves them at call time, and reset_state calls this later.)
+  # Copy the committed PRISTINE seed (status.seed.json — the live status.json is now
+  # gitignored runtime). It is the canonical ONE-KEY-PER-LINE format the scripts' no-jq
+  # json_get and the set_* seds below both depend on (a compacted cycle/limits block
+  # would make the grep fallback parse "2 }" instead of "2"), and it keeps the harness
+  # in sync with the shipped defaults.
+  cp "$SRC/shared/status.seed.json" "$SH/status.json"
+  # Defense-in-depth: normalize the volatile runtime fields to defaults so the suite's
+  # outcome never depends on a stray edit to the seed. (set_* are defined just below;
+  # sh resolves them at call time, and reset_state calls this later.)
   set_num review_cycles 0; set_num retry_count 0; set_num escalation_level 0
   set_bool human_required false
   set_str state idle; set_str owner primary; set_str updated_by system
@@ -600,6 +600,23 @@ assert_eq "no transcript entry for a failed review" 0 "$([ -f "$SH/conversation.
 "$SC/secondary-loop" --provider >/dev/null 2>&1; assert_eq "secondary-loop --provider with no value exits 2" 2 "$?"
 # --idle must be a positive integer, rejected BEFORE reaching watch (F5)
 "$SC/secondary-loop" --idle abc --once >/dev/null 2>&1; assert_eq "secondary-loop --idle abc exits 2 (not treated as idle)" 2 "$?"
+
+# =====================================================================================
+echo "[16] init-from-seed (fresh clone bootstraps live runtime files from committed seeds)"
+reset_state
+cp "$SRC/shared/status.seed.json" "$SH/status.seed.json"
+cp "$SRC/shared/master-log.seed.md" "$SH/master-log.seed.md"
+rm -f "$SH/status.json" "$SH/master-log.md"     # simulate a fresh clone: live files absent
+"$SC/status" >/dev/null 2>&1 || true            # any script sources _common.sh, which seeds them
+assert_eq "status.json bootstrapped from seed"      1 "$([ -f "$SH/status.json" ] && echo 1 || echo 0)"
+assert_eq "master-log.md bootstrapped from seed"    1 "$([ -f "$SH/master-log.md" ] && echo 1 || echo 0)"
+assert_eq "bootstrapped status matches the seed"    1 "$(diff -q "$SH/status.json" "$SH/status.seed.json" >/dev/null 2>&1 && echo 1 || echo 0)"
+assert_eq "no leftover .tmp from atomic seeding"    0 "$(ls "$SH"/*.tmp.* 2>/dev/null | wc -l | tr -d ' ')"
+# absent live file AND seed (broken install) degrades silently: a real entry point
+# still runs off json_get defaults rather than crashing.
+reset_state; rm -f "$SH/status.json" "$SH/status.seed.json"
+"$SC/new-request" --type bug-risk --files x >/dev/null 2>&1
+assert_eq "no live file + no seed degrades gracefully (new-request works off defaults)" 0 "$?"
 
 echo
 echo "================ $PASS passed, $FAIL failed ================"
