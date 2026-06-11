@@ -18,8 +18,10 @@ updating one small JSON status file. **You normally only talk to the Primary.**
 > measurable progress (see below) — and the core invariants are mechanically
 > enforced. Built and reviewed *through the framework itself*, and covered by a
 > portable test suite (`tests/run-tests.sh`, run in CI on Linux + macOS, with and
-> without `jq`). Still young — see **Safety & limits** before trusting it with
-> something important.
+> without `jq`). The unit suite runs in CI on Linux + macOS; **end-to-end runs with
+> live agents have been exercised on macOS** — reports from Linux/Windows (WSL/Git
+> Bash) users are welcome. Still young — see **Safety & limits** before trusting it
+> with something important.
 
 ---
 
