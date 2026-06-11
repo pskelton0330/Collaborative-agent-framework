@@ -18,7 +18,8 @@ progress_continuity: unknown  # set 'ok' ONLY when ids are filled & mapped to pr
 #     comma-separated `path=sha` tokens, where sha = `git hash-object <path>` of the
 #     content you reviewed. The commit gate treats a staged file as "covered" only
 #     if its current blob hash matches one recorded here, so a file changed after
-#     review reads as uncovered. Omit if you don't use the gate. ---
+#     review reads as uncovered. Omit if you don't use the gate. A path with a space
+#     or comma can't be represented and reads as uncovered (fail-safe). ---
 reviewed_shas:   # e.g. scripts/doctor=<sha> scripts/review-gate=<sha>
 ---
 

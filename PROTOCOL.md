@@ -255,7 +255,10 @@ treat a staged file as *covered* only when its current blob hash matches a sha
 recorded by an `APPROVED`/`APPROVED_WITH_CONCERNS` response — so a file edited after
 its review reads as uncovered. The field is optional and backward-compatible:
 omit it and the gate simply reports those files as unreviewed. It does not feed the
-progress overlay and is not required by the response contract.
+progress overlay and is not required by the response contract. Because tokens are
+whitespace/comma-separated, a path containing a space or comma cannot be represented
+in this format — such a file simply reads as *uncovered* (fail-safe), never falsely
+covered.
 
 **Approval semantics**
 

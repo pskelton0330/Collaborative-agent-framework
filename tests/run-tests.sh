@@ -49,6 +49,15 @@ write_status() {
   # cycle/limits block would make the grep fallback parse "2 }" instead of "2"). Copying
   # the seed also keeps the harness in sync with the shipped defaults.
   cp "$SRC/shared/status.json" "$SH/status.json"
+  # HERMETIC: the seed is also the framework's LIVE status.json, which real use mutates
+  # (e.g. leaves cycle.review_cycles > 0). Normalize the volatile runtime fields back to
+  # defaults so the suite's outcome never depends on prior framework use. (set_* are
+  # defined just below; sh resolves them at call time, and reset_state calls this later.)
+  set_num review_cycles 0; set_num retry_count 0; set_num escalation_level 0
+  set_bool human_required false
+  set_str state idle; set_str owner primary; set_str updated_by system
+  sed 's/"active_request":[[:space:]]*"[^"]*"/"active_request": null/; s/"task_label":[[:space:]]*"[^"]*"/"task_label": null/' \
+    "$SH/status.json" > "$SH/s.x" && mv "$SH/s.x" "$SH/status.json"
 }
 set_num()  { sed 's/"'"$1"'":[[:space:]]*[0-9][0-9]*/"'"$1"'": '"$2"'/' "$SH/status.json" > "$SH/s.x" && mv "$SH/s.x" "$SH/status.json"; }
 # NOTE: no `\|` alternation — that is a GNU-sed extension; BSD sed treats it literally.
