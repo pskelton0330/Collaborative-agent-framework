@@ -55,6 +55,9 @@ Every exchange is a readable file you can inspect, edit, or commit.
 - A **POSIX shell** (`/bin/sh`) and standard Unix tools: `grep`, `sed`, `awk`,
   `date`, `head`, `basename`, `dirname`, `mkdir`, `mv`, `rm`. Works on macOS
   (BSD userland) and Linux (GNU) — no GNU-only features are used.
+- **Windows:** run under **WSL** or **Git Bash**, which provide `/bin/sh` and the
+  Unix tools above. There is no native PowerShell/cmd port (and none is planned —
+  the design is deliberately shell-only).
 - **`jq` is optional but strongly recommended.** With `jq` the helper scripts edit
   `status.json` atomically; without it they fall back to a portable `grep` reader,
   print a notice, and rely on the agent to hand-edit `status.json` (more
@@ -83,6 +86,10 @@ cp -R agent-framework /path/to/your-project/
 The framework is self-contained; the scripts resolve their own location, so it
 works wherever you put it. The visible folder name (`agent-framework`) is just a
 convention — rename it if you like.
+
+**Install with your agent:** open this repo in Claude Code or Codex and say
+"install this" — the agent follows [`AGENTS.md`](AGENTS.md) (chmod the scripts, run
+`scripts/doctor`, point you at the docs).
 
 ---
 
