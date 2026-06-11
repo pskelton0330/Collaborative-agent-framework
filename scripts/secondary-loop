@@ -13,21 +13,35 @@ set -eu
 . "$(cd "$(dirname "$0")" && pwd)/_common.sh"
 
 PROVIDER="${SECONDARY_PROVIDER:-codex}"; MODEL="${SECONDARY_MODEL:-}"; IDLE=""; ONCE=0
+needval() { [ "$1" -ge 2 ] && [ "${2#-}" = "$2" ] || { echo "$3 needs a value" >&2; exit 2; }; }
 while [ $# -gt 0 ]; do
   case "$1" in
-    --provider) PROVIDER=${2:-}; shift 2 ;;
-    --model) MODEL=${2:-}; shift 2 ;;
-    --idle) IDLE=${2:-}; shift 2 ;;
+    --provider) needval "$#" "${2-}" --provider; PROVIDER=$2; shift 2 ;;
+    --model) needval "$#" "${2-}" --model; MODEL=$2; shift 2 ;;
+    --idle) needval "$#" "${2-}" --idle; IDLE=$2; shift 2 ;;
     --once) ONCE=1; shift ;;
     -h|--help) awk 'NR==1{next}/^#/{sub(/^# ?/,"");print;next}{exit}' "$0"; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
 
+# Validate --idle upfront with the SAME constraints as watch --max-idle, so an invalid
+# value can't reach watch (which would exit 2 immediately and be mistaken for an idle
+# timeout — silently skipping work in --once, or tight-looping in persistent mode).
+case "${IDLE}" in
+  '') : ;;
+  *[!0-9]*|0*|????????*) echo "--idle needs a positive integer, 1-9999999 (seconds)" >&2; exit 2 ;;
+esac
+
 export FRAMEWORK_DIR   # so the agent command (and test stubs) can resolve paths
+# Forward the chosen provider/model to secondary-agent (it reads these envs). Without
+# this, `secondary-loop --provider claude` would silently fall back to codex.
+SECONDARY_PROVIDER="$PROVIDER"; SECONDARY_MODEL="$MODEL"; export SECONDARY_PROVIDER SECONDARY_MODEL
 AGENT_CMD="${SECONDARY_AGENT_CMD:-$FRAMEWORK_DIR/scripts/secondary-agent}"
 CONV="$SHARED/conversation.md"
 STOP="$SHARED/.stop-secondary"
+INTERVAL=$(json_get '.limits.idle_poll_seconds' 8); case "$INTERVAL" in *[!0-9]*|'') INTERVAL=8 ;; esac
+fails=0; last_fail=""
 
 # print lines of a markdown '## Section' (until the next '## '), capped
 section() { awk -v h="$1" 'index($0,h)==1{f=1;next} f&&/^## /{f=0} f{print}' "$2" | sed '/^$/d' | head -8; }
@@ -61,13 +75,36 @@ while : ; do
   ids=$("$FRAMEWORK_DIR/scripts/watch" "$@" 2>/dev/null) && rc=0 || rc=$?
   case "$rc" in
     0)
-      id=$(printf '%s\n' "$ids" | sed '/^$/d' | head -1)
-      [ -n "$id" ] || continue
+      # Single-active rule: prefer the status.active_request id; if it isn't among the
+      # unprocessed set and there's more than one, decline and let the Primary reconcile.
+      active=$(json_get '.active_request' "")
+      if [ -n "$active" ] && printf '%s\n' "$ids" | grep -qx "$active"; then
+        id=$active
+      elif [ "$(printf '%s\n' "$ids" | sed '/^$/d' | grep -c .)" -le 1 ]; then
+        id=$(printf '%s\n' "$ids" | sed '/^$/d' | head -1)
+      else
+        echo "secondary-loop: >1 unprocessed and none matches active_request; leaving for the Primary." >&2
+        id=""
+      fi
+      if [ -z "$id" ]; then
+        [ "$ONCE" = 1 ] && exit 0
+        sleep "$INTERVAL"; continue
+      fi
       echo "secondary-loop: reviewing $id ($PROVIDER)" >&2
-      "$AGENT_CMD" "$id" >&2 2>&1 || echo "secondary-loop: agent failed for $id" >&2
-      append_transcript "$id"
-      log_append "SECONDARY" "HEADLESS_REVIEW" "Headless $PROVIDER review of $id." "$id"
-      [ "$ONCE" = 1 ] && exit 0
+      "$AGENT_CMD" "$id" >&2 2>&1 || true
+      if [ -f "$RESPONSES/$id.response.md" ]; then
+        append_transcript "$id"
+        log_append "SECONDARY" "HEADLESS_REVIEW" "Headless $PROVIDER review of $id." "$id"
+        fails=0; last_fail=""
+        [ "$ONCE" = 1 ] && exit 0
+      else
+        # A failed review must NOT look successful (no transcript/log); surface it.
+        echo "secondary-loop: no response published for $id (agent failed)." >&2
+        [ "$ONCE" = 1 ] && exit 1
+        if [ "$id" = "$last_fail" ]; then fails=$((fails + 1)); else fails=1; last_fail=$id; fi
+        [ "$fails" -ge 3 ] && { echo "secondary-loop: giving up on $id after $fails failed attempts." >&2; exit 1; }
+        sleep "$INTERVAL"   # back off instead of tight-looping on the same unprocessed request
+      fi
       ;;
     2) if [ "$ONCE" = 1 ]; then echo "secondary-loop: idle (--once) — nothing to do." >&2; exit 0; fi ;;
     3) echo "secondary-loop: PAUSED (status.human_required) — exiting; clear the pause and restart." >&2; exit 3 ;;

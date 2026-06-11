@@ -589,6 +589,18 @@ hid2=$("$SC/new-request" --type bug-risk --files a 2>/dev/null); fill_draft "$SH
 set_bool human_required true
 SECONDARY_AGENT_CMD="$stub" "$SC/secondary-loop" --once --idle 1 >/dev/null 2>&1; assert_eq "secondary-loop exits 3 when paused" 3 "$?"
 
+# a child that publishes nothing must NOT look successful (F2): --once exits nonzero,
+# and no transcript entry is written for the failed review.
+failstub="$SANDBOX/fail-secondary"; printf '#!/bin/sh\nexit 0\n' > "$failstub"; chmod +x "$failstub"
+reset_state
+hid3=$("$SC/new-request" --type bug-risk --files a 2>/dev/null); fill_draft "$SH/requests/$hid3.md.draft"; "$SC/submit-request" "$hid3" >/dev/null 2>&1
+SECONDARY_AGENT_CMD="$failstub" "$SC/secondary-loop" --once --idle 1 >/dev/null 2>&1; assert_eq "secondary-loop exits nonzero when no response is published" 1 "$?"
+assert_eq "no transcript entry for a failed review" 0 "$([ -f "$SH/conversation.md" ] && grep -q "$hid3" "$SH/conversation.md" && echo 1 || echo 0)"
+# option operand validation (F4)
+"$SC/secondary-loop" --provider >/dev/null 2>&1; assert_eq "secondary-loop --provider with no value exits 2" 2 "$?"
+# --idle must be a positive integer, rejected BEFORE reaching watch (F5)
+"$SC/secondary-loop" --idle abc --once >/dev/null 2>&1; assert_eq "secondary-loop --idle abc exits 2 (not treated as idle)" 2 "$?"
+
 echo
 echo "================ $PASS passed, $FAIL failed ================"
 [ "$FAIL" -eq 0 ]

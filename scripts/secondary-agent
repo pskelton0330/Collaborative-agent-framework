@@ -10,10 +10,11 @@ set -eu
 . "$(cd "$(dirname "$0")" && pwd)/_common.sh"
 
 PROVIDER="${SECONDARY_PROVIDER:-codex}"; MODEL="${SECONDARY_MODEL:-}"; ID=""
+needval() { [ "$1" -ge 2 ] && [ "${2#-}" = "$2" ] || { echo "$3 needs a value" >&2; exit 2; }; }
 while [ $# -gt 0 ]; do
   case "$1" in
-    --provider) PROVIDER=${2:-}; shift 2 ;;
-    --model) MODEL=${2:-}; shift 2 ;;
+    --provider) needval "$#" "${2-}" --provider; PROVIDER=$2; shift 2 ;;
+    --model) needval "$#" "${2-}" --model; MODEL=$2; shift 2 ;;
     -h|--help) awk 'NR==1{next}/^#/{sub(/^# ?/,"");print;next}{exit}' "$0"; exit 0 ;;
     -*) echo "unknown arg: $1" >&2; exit 2 ;;
     *) ID=$1; shift ;;
