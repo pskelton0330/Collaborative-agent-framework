@@ -232,6 +232,7 @@ resolved_since: [F2]          # ids the Primary's last fix closed THIS cycle
 new_this_cycle: [F4]          # ids raised for the first time THIS cycle
 movement: true                # advisory only — NOT trusted by the gate
 progress_continuity: ok       # ok | unknown
+reviewed_shas: src/a.ts=<sha> # optional; enables the commit gate (below)
 ---
 
 ## Findings
@@ -246,6 +247,15 @@ One short paragraph on residual risk.
 ## Approval rationale
 Why APPROVED / APPROVED_WITH_CONCERNS / BLOCKED.
 ```
+
+**Optional `reviewed_shas` (commit-gate coverage).** A single front-matter line of
+space- or comma-separated `path=sha` tokens, where `sha = git hash-object <path>`
+of the content actually reviewed. It lets `scripts/review-gate` (a pre-commit hook)
+treat a staged file as *covered* only when its current blob hash matches a sha
+recorded by an `APPROVED`/`APPROVED_WITH_CONCERNS` response — so a file edited after
+its review reads as uncovered. The field is optional and backward-compatible:
+omit it and the gate simply reports those files as unreviewed. It does not feed the
+progress overlay and is not required by the response contract.
 
 **Approval semantics**
 

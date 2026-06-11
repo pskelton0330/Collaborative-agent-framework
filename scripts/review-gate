@@ -1,0 +1,114 @@
+#!/bin/sh
+# review-gate — flag code that is about to be committed without a current peer
+# review. Bridges the framework's one soft invariant (the Primary must request a
+# review at the right moment) to a mechanical check at the commit boundary.
+#
+# A staged file is "covered" iff some APPROVED / APPROVED_WITH_CONCERNS response
+# (in shared/responses/ or shared/archive/) records a `reviewed_shas:` entry
+# `<path>=<sha>` whose sha equals the staged content's blob hash. So a file that
+# was reviewed and then changed reads as uncovered — coverage tracks content, not
+# just "was looked at once".
+#
+# Modes:
+#   review-gate                 advisory: warn on uncovered staged files, exit 0
+#   review-gate --block         blocking: exit 1 if any staged file is uncovered
+#   review-gate --all           audit every tracked file (advisory)
+#   review-gate --install       install as this repo's .git/hooks/pre-commit (advisory)
+set -eu
+. "$(cd "$(dirname "$0")" && pwd)/_common.sh"
+
+SELF=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
+MODE=staged; BLOCK=0
+case "${1:-}" in
+  --block) BLOCK=1 ;;
+  --all) MODE=all ;;
+  --install) MODE=install ;;
+  ""|--staged) : ;;
+  -h|--help) awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next}{exit}' "$0"; exit 0 ;;
+  *) echo "unknown arg: $1" >&2; exit 2 ;;
+esac
+
+command -v git >/dev/null 2>&1 || { echo "review-gate: git not found" >&2; exit 2; }
+git rev-parse --git-dir >/dev/null 2>&1 || { echo "review-gate: not inside a git repo" >&2; exit 2; }
+
+if [ "$MODE" = install ]; then
+  hookdir=$(git rev-parse --git-dir)/hooks
+  mkdir -p "$hookdir"
+  hook="$hookdir/pre-commit"
+  if [ -e "$hook" ]; then
+    cp "$hook" "$hook.bak.$$" || { echo "review-gate: failed to back up existing hook; aborting" >&2; exit 1; }
+    echo "backed up existing hook -> $hook.bak.$$"
+  fi
+  printf '#!/bin/sh\n# installed by agent-framework review-gate (advisory).\n# change --staged to --block to make it blocking.\nexec "%s" --staged\n' "$SELF" > "$hook"
+  chmod +x "$hook"
+  echo "installed advisory review-gate -> $hook"
+  echo "to make it blocking: edit the hook and change --staged to --block."
+  exit 0
+fi
+
+# Collect candidate response files (open + archived).
+responses=""
+for f in "$RESPONSES"/*.response.md "$ARCHIVE"/*/response.md; do
+  [ -e "$f" ] && responses="$responses $f"
+done
+
+# covered <path> <sha> — 0 if an APPROVED(_WITH_CONCERNS) response records path=sha.
+covered() {
+  p=$1; s=$2
+  for r in $responses; do
+    case "$(fm_value "$r" approval)" in
+      APPROVED|APPROVED_WITH_CONCERNS) : ;;
+      *) continue ;;
+    esac
+    shas=$(fm_value "$r" reviewed_shas) || shas=""
+    [ -n "$shas" ] || continue
+    for tok in $(printf '%s' "$shas" | tr ',' ' '); do
+      [ "$tok" = "$p=$s" ] && return 0
+    done
+  done
+  return 1
+}
+
+# Build the file list for the chosen mode. Use NUL-free newline records read with
+# `while read`, so paths containing spaces are handled correctly (a space-split
+# `for f in $files` would silently skip them — a gate bypass).
+flist=$(mktemp) || { echo "review-gate: mktemp failed" >&2; exit 2; }
+if [ "$MODE" = all ]; then
+  git ls-files > "$flist"
+else
+  git diff --cached --name-only --diff-filter=ACM > "$flist"
+fi
+if [ ! -s "$flist" ]; then rm -f "$flist"; echo "review-gate: no files to check."; exit 0; fi
+
+uflist=$(mktemp) || { rm -f "$flist"; echo "review-gate: mktemp failed" >&2; exit 2; }
+nchecked=0
+while IFS= read -r f; do
+  [ -n "$f" ] || continue
+  nchecked=$((nchecked + 1))
+  if [ "$MODE" = all ]; then
+    s=$(git hash-object "$f" 2>/dev/null) || continue
+  else
+    s=$(git rev-parse ":$f" 2>/dev/null) || continue   # staged blob hash
+  fi
+  covered "$f" "$s" || printf '%s\n' "$f" >> "$uflist"
+done < "$flist"
+rm -f "$flist"
+
+if [ ! -s "$uflist" ]; then
+  rm -f "$uflist"
+  echo "review-gate: all $nchecked file(s) covered by a current peer review."
+  exit 0
+fi
+
+echo "review-gate: the following file(s) have NO current peer review:" >&2
+while IFS= read -r f; do echo "  - $f" >&2; done < "$uflist"
+rm -f "$uflist"
+echo "Open a review (scripts/new-request ... -> submit-request) covering them, or" >&2
+echo "have the Secondary record reviewed_shas for the current content." >&2
+
+if [ "$BLOCK" -eq 1 ]; then
+  echo "review-gate: BLOCKING (commit refused)." >&2
+  exit 1
+fi
+echo "review-gate: advisory only — commit allowed. (Use --block to enforce.)" >&2
+exit 0

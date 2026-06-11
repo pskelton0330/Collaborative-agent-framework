@@ -171,6 +171,8 @@ agent-framework/
     check-progress           ← productive / productive-rank-only / impasse / insufficient-data
     archive-request          ← move finished exchange(s) into archive/
     status                   ← pretty-print status.json + a work summary
+    doctor                   ← setup self-test (shared state sane, jq, orphans, invariants)
+    review-gate              ← optional pre-commit hook: warn/block on un-reviewed staged files
 
   tests/
     run-tests.sh             ← portable smoke harness (run under /bin/sh and dash)

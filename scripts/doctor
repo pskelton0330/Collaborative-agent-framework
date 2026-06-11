@@ -1,0 +1,66 @@
+#!/bin/sh
+# doctor — setup self-test for the agent framework. Checks that shared state is
+# sane so "why isn't the loop moving?" collapses into one command. Read-only:
+# it never edits status.json or any coordination file. Exit 0 if no hard FAILs.
+set -eu
+. "$(cd "$(dirname "$0")" && pwd)/_common.sh"
+
+pass=0; warn=0; fail=0
+ok()   { printf '  ok    %s\n' "$1"; pass=$((pass + 1)); }
+wn()   { printf '  WARN  %s\n' "$1"; warn=$((warn + 1)); }
+bad()  { printf '  FAIL  %s\n' "$1"; fail=$((fail + 1)); }
+
+echo "== agent-framework doctor =="
+echo "   framework: $FRAMEWORK_DIR"
+
+# 1. Shared layout exists and is writable.
+for d in "$SHARED" "$REQUESTS" "$RESPONSES" "$ESCALATION" "$ARCHIVE" "$TEMPLATES"; do
+  if [ ! -d "$d" ]; then bad "missing dir: $d"
+  elif [ ! -w "$d" ]; then bad "not writable: $d"
+  fi
+done
+[ "$fail" -eq 0 ] && ok "shared/ layout present and writable"
+
+# 2. status.json present and parseable.
+if [ ! -f "$STATUS" ]; then
+  bad "status.json missing ($STATUS)"
+elif [ "$HAVE_JQ" -eq 1 ]; then
+  if jq empty "$STATUS" >/dev/null 2>&1; then ok "status.json is valid JSON"
+  else bad "status.json is not valid JSON"; fi
+else
+  wn "jq not installed — cannot fully validate status.json; agents must hand-edit it"
+fi
+
+# 3. jq present (recommended, not required).
+[ "$HAVE_JQ" -eq 1 ] && ok "jq available (atomic status writes)" \
+                     || wn "jq not found — safety gates still work, but status edits are manual"
+
+# 4. No orphaned staging files (a crash leaves these; safe to delete).
+orphans=$(find "$REQUESTS" "$ESCALATION" "$RESPONSES" \
+  \( -name '*.draft' -o -name '*.response.md.tmp' \) 2>/dev/null | wc -l | tr -d ' ')
+[ "$orphans" -eq 0 ] && ok "no orphaned .draft/.tmp staging files" \
+                     || wn "$orphans orphaned staging file(s) — safe to delete (PROTOCOL §14)"
+
+# 5. Single-active invariant: at most one unprocessed request.
+n=$(unprocessed_ids | grep -c . || true)
+if [ "$n" -le 1 ]; then ok "single-active invariant holds ($n unprocessed)"
+else bad "$n unprocessed requests — violates single-active (PROTOCOL §14); Primary must resolve"; fi
+
+# 6. Helper scripts are executable.
+nx=0
+for s in "$FRAMEWORK_DIR"/scripts/*; do
+  [ -f "$s" ] || continue
+  case "$s" in *_common.sh) continue ;; esac
+  [ -x "$s" ] || { wn "not executable: $s"; nx=$((nx + 1)); }
+done
+[ "$nx" -eq 0 ] && ok "all helper scripts are executable"
+
+# 7. human_required surfaced (informational, not a failure).
+hr=$(json_get '.human_required' false)
+[ "$hr" = "true" ] && wn "human_required=true — automation is paused until a human clears it" \
+                   || ok "automation not paused (human_required=false)"
+
+echo "== summary =="
+echo "  $pass ok, $warn warn, $fail fail"
+[ "$fail" -eq 0 ] && { echo "  healthy."; exit 0; }
+echo "  problems found — see FAIL lines above."; exit 1

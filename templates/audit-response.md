@@ -14,9 +14,12 @@ resolved_since: []            # ids the Primary's last fix actually closed this 
 new_this_cycle: []            # ids you are raising for the first time this cycle
 movement: false               # advisory only — did anything change vs the last cycle?
 progress_continuity: unknown  # set 'ok' ONLY when ids are filled & mapped to prior cycle
-reviewed_files:
-  - path/to/file-a
-  - path/to/file-b
+# --- reviewed_shas (optional): enables scripts/review-gate. One line, space- or
+#     comma-separated `path=sha` tokens, where sha = `git hash-object <path>` of the
+#     content you reviewed. The commit gate treats a staged file as "covered" only
+#     if its current blob hash matches one recorded here, so a file changed after
+#     review reads as uncovered. Omit if you don't use the gate. ---
+reviewed_shas:   # e.g. scripts/doctor=<sha> scripts/review-gate=<sha>
 ---
 
 ## Findings

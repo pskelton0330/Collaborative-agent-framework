@@ -5,6 +5,20 @@ All notable changes to this framework are recorded here. Dates are UTC.
 ## [Unreleased]
 
 ### Added
+- **`scripts/doctor`** — read-only setup self-test: shared/ layout + writability,
+  `status.json` validity, jq presence, orphaned `.draft`/`.tmp` staging files, the
+  single-active invariant, script executability, and the `human_required` pause.
+  Exits nonzero only on a hard failure.
+- **`scripts/review-gate`** — optional pre-commit hook that flags staged files with
+  no *current* peer review. A file is covered only when an APPROVED /
+  APPROVED_WITH_CONCERNS response records a `reviewed_shas:` entry whose sha matches
+  the staged blob, so a file edited after review reads as uncovered. Advisory by
+  default (`--block` to enforce, `--install` to wire the hook, `--all` to audit).
+  Converts the framework's one soft invariant — "the Primary must request review at
+  the right moment" — into a mechanical check at the commit boundary.
+- **`reviewed_shas`** optional response field (replaces the unused `reviewed_files`
+  list in the template) — the coverage signal the commit gate consumes. Optional and
+  contract-neutral: not parsed or required by `complete-request`.
 - **`THREAT_MODEL.md`** — documents the adversarial dynamics between the two
   agents: why intentional inter-LLM sabotage is a *reasoned non-goal* (the
   architecture provides no competitive incentive), the risks the framework
