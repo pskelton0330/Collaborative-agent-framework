@@ -25,3 +25,7 @@ shared/status.json.tmp.*
 # ignore the mutable shared state so it doesn't churn your project's history:
 #   shared/status.json
 #   shared/master-log.md
+
+# Headless secondary runtime
+shared/conversation.md
+shared/.stop-secondary

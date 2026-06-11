@@ -138,6 +138,30 @@ actions is not. So:
 
 ---
 
+## Headless / persistent Secondary (no second terminal)
+
+Instead of opening a second terminal and pasting the Secondary startup prompt, you
+can run the Secondary **headless and persistent** — it auto-detects published
+requests via `scripts/watch` and reviews them with an LLM CLI:
+
+```sh
+# run next to your Primary; it watches forever and reviews each request
+nohup scripts/secondary-loop --provider codex &      # or --provider claude [--model ...]
+# stop it gracefully:
+touch shared/.stop-secondary
+```
+
+- `secondary-loop` blocks on `watch`; on each request it calls `secondary-agent`
+  (which runs `codex exec` or `claude -p` headless), then appends the exchange —
+  request summary + the Secondary's verdict, findings, and rationale — to
+  `shared/conversation.md` (a readable companion to the terse `master-log.md`).
+- **Provider-agnostic / either direction:** Claude-Primary + Codex-Secondary, or
+  Codex-Primary + Claude-Secondary — roles are not tied to models.
+- This reproduces the two-terminal *auto-detection* ergonomic headlessly. (It does
+  not run the two agents truly concurrently; the loop reviews one request at a time.)
+
+---
+
 ## Folder layout
 
 ```
@@ -154,7 +178,8 @@ agent-framework/
 
   shared/                    ← all mutable coordination state lives here
     status.json              ← small machine-readable state (owner, state, counters, limits)
-    master-log.md            ← human-readable append-only timeline
+    master-log.md            ← human-readable append-only timeline (terse events)
+    conversation.md          ← headless-mode transcript of Primary↔Secondary exchanges (runtime)
     requests/                ← open requests   (Primary → Secondary)
     responses/               ← responses       (Secondary → Primary)
     escalation/              ← deeper-review escalation requests
@@ -176,6 +201,8 @@ agent-framework/
     doctor                   ← setup self-test (shared state sane, jq, orphans, invariants)
     review-gate              ← optional pre-commit hook: warn/block on un-reviewed staged files
     plan                     ← collaborative planning (Phase 1): blind-draft → reveal → synthesize
+    secondary-agent          ← one-shot headless review of a request (provider: codex | claude)
+    secondary-loop           ← PERSISTENT headless Secondary: watch → review → log (no 2nd terminal)
 
   tests/
     run-tests.sh             ← portable smoke harness (run under /bin/sh and dash)

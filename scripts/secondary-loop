@@ -1,0 +1,76 @@
+#!/bin/sh
+# secondary-loop — PERSISTENT headless Secondary. Blocks on scripts/watch; when the
+# Primary publishes a request it runs a headless review (via secondary-agent) and
+# appends the exchange to shared/conversation.md. This is the headless equivalent of
+# leaving a Secondary agent running in a second terminal: it auto-detects work, you
+# don't invoke it per turn.
+#
+#   secondary-loop [--provider codex|claude] [--model M] [--idle SECS] [--once]
+# Run it in the background (e.g. `nohup scripts/secondary-loop &`) next to your
+# Primary. Stop: `touch shared/.stop-secondary` (graceful) or Ctrl-C. Exits 3 if the
+# system is paused (status.human_required). --once handles a single request (testing).
+set -eu
+. "$(cd "$(dirname "$0")" && pwd)/_common.sh"
+
+PROVIDER="${SECONDARY_PROVIDER:-codex}"; MODEL="${SECONDARY_MODEL:-}"; IDLE=""; ONCE=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --provider) PROVIDER=${2:-}; shift 2 ;;
+    --model) MODEL=${2:-}; shift 2 ;;
+    --idle) IDLE=${2:-}; shift 2 ;;
+    --once) ONCE=1; shift ;;
+    -h|--help) awk 'NR==1{next}/^#/{sub(/^# ?/,"");print;next}{exit}' "$0"; exit 0 ;;
+    *) echo "unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+export FRAMEWORK_DIR   # so the agent command (and test stubs) can resolve paths
+AGENT_CMD="${SECONDARY_AGENT_CMD:-$FRAMEWORK_DIR/scripts/secondary-agent}"
+CONV="$SHARED/conversation.md"
+STOP="$SHARED/.stop-secondary"
+
+# print lines of a markdown '## Section' (until the next '## '), capped
+section() { awk -v h="$1" 'index($0,h)==1{f=1;next} f&&/^## /{f=0} f{print}' "$2" | sed '/^$/d' | head -8; }
+files_of() { awk '/^files:/{f=1;next} f&&/^[[:space:]]*-[[:space:]]*/{sub(/^[[:space:]]*-[[:space:]]*/,"");printf "%s ",$0;next} f&&/^[^[:space:]]/{f=0}' "$1"; }
+
+append_transcript() {
+  id=$1; req="$REQUESTS/$id.md"; [ -e "$req" ] || req="$ESCALATION/$id.escalation.md"
+  resp="$RESPONSES/$id.response.md"
+  if [ ! -f "$CONV" ]; then
+    printf '# Agent conversation log\n\nAppend-only, human-readable transcript of Primary<->Secondary exchanges handled headlessly. Companion to master-log.md (terse events).\n' > "$CONV"
+  fi
+  {
+    printf '\n## [%s] %s\n' "$(now_iso)" "$id"
+    printf -- '- secondary: %s%s\n' "$PROVIDER" "${MODEL:+ ($MODEL)}"
+    [ -e "$req" ] && printf -- '- request: type=%s files=[%s]\n' "$(fm_value "$req" type)" "$(files_of "$req" | sed 's/ $//')"
+    if [ -f "$resp" ]; then
+      printf -- '- verdict: %s (risk %s, cycle %s)\n' \
+        "$(fm_value "$resp" approval)" "$(fm_value "$resp" risk)" "$(fm_value "$resp" review_cycle)"
+      printf -- '\n  Findings:\n';  section '## Findings' "$resp" | sed 's/^/    /'
+      printf -- '\n  Rationale:\n'; section '## Approval rationale' "$resp" | sed 's/^/    /'
+    else
+      printf -- '- (no response published; the secondary agent may have failed)\n'
+    fi
+  } >> "$CONV"
+}
+
+echo "secondary-loop: watching with provider=$PROVIDER. stop with: touch $STOP" >&2
+while : ; do
+  if [ -e "$STOP" ]; then rm -f "$STOP"; echo "secondary-loop: stop sentinel seen — exiting." >&2; exit 0; fi
+  if [ -n "$IDLE" ]; then set -- --max-idle "$IDLE"; else set -- ; fi
+  ids=$("$FRAMEWORK_DIR/scripts/watch" "$@" 2>/dev/null) && rc=0 || rc=$?
+  case "$rc" in
+    0)
+      id=$(printf '%s\n' "$ids" | sed '/^$/d' | head -1)
+      [ -n "$id" ] || continue
+      echo "secondary-loop: reviewing $id ($PROVIDER)" >&2
+      "$AGENT_CMD" "$id" >&2 2>&1 || echo "secondary-loop: agent failed for $id" >&2
+      append_transcript "$id"
+      log_append "SECONDARY" "HEADLESS_REVIEW" "Headless $PROVIDER review of $id." "$id"
+      [ "$ONCE" = 1 ] && exit 0
+      ;;
+    2) if [ "$ONCE" = 1 ]; then echo "secondary-loop: idle (--once) — nothing to do." >&2; exit 0; fi ;;
+    3) echo "secondary-loop: PAUSED (status.human_required) — exiting; clear the pause and restart." >&2; exit 3 ;;
+    *) echo "secondary-loop: watch error (rc=$rc) — exiting." >&2; exit 1 ;;
+  esac
+done

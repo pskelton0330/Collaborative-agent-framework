@@ -1,0 +1,55 @@
+#!/bin/sh
+# secondary-agent — run ONE headless Secondary review of <request-id> with a chosen
+# LLM provider. Provider-agnostic: codex (codex exec) or claude (claude -p). The
+# agent reads the request, reviews only the listed files, writes the response to the
+# staging path, and runs complete-request to publish it. Never edits project files.
+#
+#   secondary-agent <request-id> [--provider codex|claude] [--model M]
+# Env: SECONDARY_PROVIDER, SECONDARY_MODEL act as defaults.
+set -eu
+. "$(cd "$(dirname "$0")" && pwd)/_common.sh"
+
+PROVIDER="${SECONDARY_PROVIDER:-codex}"; MODEL="${SECONDARY_MODEL:-}"; ID=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --provider) PROVIDER=${2:-}; shift 2 ;;
+    --model) MODEL=${2:-}; shift 2 ;;
+    -h|--help) awk 'NR==1{next}/^#/{sub(/^# ?/,"");print;next}{exit}' "$0"; exit 0 ;;
+    -*) echo "unknown arg: $1" >&2; exit 2 ;;
+    *) ID=$1; shift ;;
+  esac
+done
+[ -n "$ID" ] || { echo "usage: secondary-agent <request-id> [--provider codex|claude] [--model M]" >&2; exit 2; }
+valid_id "$ID" || { echo "bad request id: $ID" >&2; exit 2; }
+[ -e "$REQUESTS/$ID.md" ] || [ -e "$ESCALATION/$ID.escalation.md" ] || { echo "no published request: $ID" >&2; exit 1; }
+
+PROMPT="You are the SECONDARY reviewer in a file-based two-agent framework at $FRAMEWORK_DIR. READ-ONLY peer review: you review and write a response file; you NEVER edit project files. Read $FRAMEWORK_DIR/PROTOCOL.md and $FRAMEWORK_DIR/SECONDARY_AGENT.md for the rules.
+
+Review request $ID:
+1. Read $FRAMEWORK_DIR/shared/requests/$ID.md (or escalation/$ID.escalation.md).
+2. Review ONLY the files it lists, honoring its review scope. Be genuinely critical.
+3. Write your response to $FRAMEWORK_DIR/shared/responses/$ID.response.md.tmp using the contract in $FRAMEWORK_DIR/templates/audit-response.md: front-matter request_id=$ID, responded_at (UTC, from: date -u +%Y-%m-%dT%H:%M:%SZ), approval (APPROVED|APPROVED_WITH_CONCERNS|BLOCKED), risk (low|medium|high), review_cycle matching the request's review_cycle, and the five progress fields (unresolved/resolved_since/new_this_cycle/movement/progress_continuity) with safe cycle-1 defaults unless this is a re-audit. Body sections (all non-empty): '## Findings', '## Recommended fixes', '## Risk assessment', '## Approval rationale'.
+4. Publish it: cd $FRAMEWORK_DIR && scripts/complete-request $ID  (fix the .tmp and rerun if it reports validation errors).
+Do not edit the reviewed files. Print your verdict (approval + risk) when done."
+
+case "$PROVIDER" in
+  codex)
+    command -v codex >/dev/null 2>&1 || { echo "codex not found on PATH" >&2; exit 127; }
+    if [ -n "$MODEL" ]; then
+      printf '%s' "$PROMPT" | codex exec --skip-git-repo-check -s workspace-write -C "$FRAMEWORK_DIR" -m "$MODEL" -
+    else
+      printf '%s' "$PROMPT" | codex exec --skip-git-repo-check -s workspace-write -C "$FRAMEWORK_DIR" -
+    fi
+    ;;
+  claude)
+    command -v claude >/dev/null 2>&1 || { echo "claude not found on PATH" >&2; exit 127; }
+    # Local controlled Secondary: it only reads, writes one response file, and runs
+    # complete-request, so it runs unattended with permissions bypassed.
+    if [ -n "$MODEL" ]; then
+      ( cd "$FRAMEWORK_DIR" && claude -p "$PROMPT" --dangerously-skip-permissions --model "$MODEL" )
+    else
+      ( cd "$FRAMEWORK_DIR" && claude -p "$PROMPT" --dangerously-skip-permissions )
+    fi
+    ;;
+  *) echo "unknown provider: $PROVIDER (want codex|claude)" >&2; exit 2 ;;
+esac

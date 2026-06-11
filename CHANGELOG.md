@@ -5,6 +5,15 @@ All notable changes to this framework are recorded here. Dates are UTC.
 ## [Unreleased]
 
 ### Added
+- **Persistent headless Secondary + conversation transcript.** `scripts/secondary-loop`
+  is the headless equivalent of leaving a Secondary in a second terminal: it blocks on
+  `scripts/watch`, and on each published request runs a headless review via
+  `scripts/secondary-agent` (provider-agnostic: `codex exec` or `claude -p`), then
+  appends the exchange (request summary + verdict/findings/rationale) to
+  `shared/conversation.md` — a readable companion to `master-log.md`. Reproduces the
+  two-terminal auto-detection ergonomic; works in either pairing direction. Stop via
+  `shared/.stop-secondary`; exits 3 when paused. 5 new tests (loop/transcript verified
+  with a stub agent, across jq/no-jq/dash).
 - **Collaborative planning (ADAPTIVE_COLLABORATION Phase 1)** — a pre-implementation
   planning phase where both agents draft a plan independently and blind, then the
   Primary reveals and synthesizes. New `scripts/plan` CLI (new/seal/submit/reveal/

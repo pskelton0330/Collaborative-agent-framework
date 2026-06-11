@@ -554,6 +554,41 @@ None.
 EOF
 "$SC/plan" seal "$bpid" >/dev/null 2>&1; assert_eq "seal accepts back-ticked <id> prose (filled fix)" 0 "$?"
 
+# =====================================================================================
+echo "[15] persistent headless secondary (secondary-loop + transcript)"
+# A stub 'secondary agent' that writes a valid response + publishes it (no real LLM).
+# Quoted heredoc: it resolves paths from $FRAMEWORK_DIR at run time (exported by the harness).
+stub="$SANDBOX/stub-secondary"
+cat > "$stub" <<'STUB'
+#!/bin/sh
+id=$1; sh="$FRAMEWORK_DIR/shared"; sc="$FRAMEWORK_DIR/scripts"
+{
+  echo '---'; echo "request_id: $id"; echo 'responded_at: 2026-06-11T00:00:00Z'
+  echo 'approval: APPROVED'; echo 'risk: low'; echo 'review_cycle: 1'
+  echo 'unresolved: []'; echo 'resolved_since: []'; echo 'new_this_cycle: []'
+  echo 'movement: false'; echo 'progress_continuity: unknown'; echo '---'
+  echo '## Findings'; echo 'stub: none.'; echo '## Recommended fixes'; echo 'none.'
+  echo '## Risk assessment'; echo 'low.'; echo '## Approval rationale'; echo 'stub approval.'
+} > "$sh/responses/$id.response.md.tmp"
+"$sc/complete-request" "$id" >/dev/null 2>&1
+STUB
+chmod +x "$stub"
+
+reset_state; rm -f "$SH/conversation.md"
+hid=$("$SC/new-request" --type bug-risk --files a 2>/dev/null); fill_draft "$SH/requests/$hid.md.draft"; "$SC/submit-request" "$hid" >/dev/null 2>&1
+SECONDARY_AGENT_CMD="$stub" "$SC/secondary-loop" --once --idle 1 >/dev/null 2>&1; rc=$?
+assert_eq "secondary-loop --once handled a request (exit 0)" 0 "$rc"
+assert_eq "headless secondary published a response" 1 "$([ -f "$SH/responses/$hid.response.md" ] && echo 1 || echo 0)"
+assert_eq "conversation transcript captured the exchange" 1 "$([ -f "$SH/conversation.md" ] && grep -q "$hid" "$SH/conversation.md" && echo 1 || echo 0)"
+
+reset_state
+SECONDARY_AGENT_CMD="$stub" "$SC/secondary-loop" --once --idle 1 >/dev/null 2>&1; assert_eq "secondary-loop --once idle exits 0" 0 "$?"
+
+reset_state
+hid2=$("$SC/new-request" --type bug-risk --files a 2>/dev/null); fill_draft "$SH/requests/$hid2.md.draft"; "$SC/submit-request" "$hid2" >/dev/null 2>&1
+set_bool human_required true
+SECONDARY_AGENT_CMD="$stub" "$SC/secondary-loop" --once --idle 1 >/dev/null 2>&1; assert_eq "secondary-loop exits 3 when paused" 3 "$?"
+
 echo
 echo "================ $PASS passed, $FAIL failed ================"
 [ "$FAIL" -eq 0 ]
