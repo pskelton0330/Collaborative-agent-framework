@@ -29,3 +29,4 @@ shared/status.json.tmp.*
 # Headless secondary runtime
 shared/conversation.md
 shared/.stop-secondary
+shared/*.out
