@@ -13,8 +13,9 @@ Everything coordinates through plain files in this folder.
 The two agents talk by dropping Markdown files into shared directories and
 updating one small JSON status file. **You normally only talk to the Primary.**
 
-> Status: **v1.1**. The review loop is now *self-regulating* (a progress overlay
-> stops a stuck thread early; see below) and the core invariants are mechanically
+> Status: **v1.2**. The review loop is *self-regulating* — a progress overlay
+> stops a stuck thread early, and an adaptive ceiling extends it only along
+> measurable progress (see below) — and the core invariants are mechanically
 > enforced. Built and reviewed *through the framework itself*, and covered by a
 > portable test suite (`tests/run-tests.sh`, run in CI on Linux + macOS, with and
 > without `jq`). Still young — see **Safety & limits** before trusting it with
@@ -143,6 +144,7 @@ actions is not. So:
 agent-framework/
   README.md                  ← you are here
   PROTOCOL.md                ← the contract: state machine, lifecycle, safeguards, recovery
+  THREAT_MODEL.md            ← adversarial dynamics: what it defends against, and why not sabotage
   PRIMARY_AGENT.md           ← operating manual for the Primary Agent
   SECONDARY_AGENT.md         ← operating manual for the Secondary Agent
   EXAMPLE_WORKFLOW.md        ← worked examples + demo transcript + extension ideas
@@ -212,6 +214,13 @@ See [`PROTOCOL.md`](PROTOCOL.md) for the authoritative rules.
   not a correctness guarantee.
 - Still **young.** Prove it on a low-stakes repo first; keep a human gate on
   commits/pushes/deploys.
+
+**Adversarial dynamics between the agents.** The agents are cooperative peers, not
+competitors — the framework has **no comparative scoring**, so "one LLM sabotages
+the other to look better" has no incentive to act on. The risks it *does* design
+for are convergence collapse (the agents agreeing too easily) and cross-agent
+prompt injection. See [`THREAT_MODEL.md`](THREAT_MODEL.md) for the full rationale
+and the conditions that would require revisiting it.
 
 ---
 

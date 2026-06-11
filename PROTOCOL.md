@@ -525,3 +525,24 @@ rest for the Primary — it never guesses or processes multiple.
 
 Staging files left by a crash are always safe to delete. The non-staging file is
 the source of truth.
+
+---
+
+## 15. Cooperative-agent invariant (anti-sabotage)
+
+The two agents are **cooperative peers**, not competitors. To keep them that way,
+one invariant is absolute:
+
+- **No comparative scoring, ever.** The framework MUST NOT introduce any mechanism
+  that scores, ranks, or rewards one agent relative to the other — no per-agent
+  quality metric, leaderboard, or reward tied to the other's findings or failures.
+  Inter-agent sabotage requires an incentive to exist; a comparative metric is how
+  that incentive gets manufactured. The only "score" is about the *work* (a
+  response's approval/risk), never about the *agents*.
+
+This is why intentional inter-LLM sabotage is a **reasoned non-goal** rather than an
+oversight: the architecture (no scoreboard, stateless identity-less sessions,
+single-owner decider) gives it nothing to optimize against. The dynamics the
+framework *does* defend against — convergence collapse (sycophancy) and cross-agent
+prompt injection — and the conditions that would require revisiting this stance are
+documented in [`THREAT_MODEL.md`](THREAT_MODEL.md).

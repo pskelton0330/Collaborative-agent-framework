@@ -2,6 +2,22 @@
 
 All notable changes to this framework are recorded here. Dates are UTC.
 
+## [Unreleased]
+
+### Added
+- **`THREAT_MODEL.md`** — documents the adversarial dynamics between the two
+  agents: why intentional inter-LLM sabotage is a *reasoned non-goal* (the
+  architecture provides no competitive incentive), the risks the framework
+  actually designs for (convergence collapse / sycophancy, and cross-agent prompt
+  injection), and the triggers that would require revisiting the stance.
+- **Cooperative-agent invariant (PROTOCOL §15): no comparative scoring, ever.** The
+  framework must never score, rank, or reward one agent relative to the other —
+  the design rule that keeps the sabotage incentive from existing.
+
+### Fixed
+- README status line corrected from v1.1 to **v1.2** (the adaptive review ceiling
+  shipped in 1.2.0 but the front-page status still read 1.1).
+
 ## [1.2.0] — 2026-06-05
 
 ### Added
