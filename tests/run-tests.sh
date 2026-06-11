@@ -462,6 +462,80 @@ id=$("$SC/new-request" --type security --files a 2>/dev/null); fill_draft "$SH/r
 stage_response "$id" APPROVED 1; "$SC/complete-request" "$id" >/dev/null 2>&1; "$SC/archive-request" "$id" >/dev/null 2>&1
 "$SC/new-request" --type security --id "$id" >/dev/null 2>&1; assert_eq "cannot reopen archived id" 1 "$?"
 
+# =====================================================================================
+echo "[14] collaborative planning (Phase 1, commit-reveal)"
+rm -rf "$SH/plans"
+pid=$("$SC/plan" new "test plan" 2>/dev/null)
+assert_contains "plan new mints a PLAN id" "PLAN-" "$pid"
+pd="$SH/plans/$pid"
+assert_eq "plan new scaffolds problem.md" 1 "$([ -f "$pd/problem.md" ] && echo 1 || echo 0)"
+# seal refuses before a filled primary draft exists
+"$SC/plan" seal "$pid" >/dev/null 2>&1; assert_eq "seal refuses unfilled primary draft" 1 "$?"
+cat > "$pd/primary-draft.md" <<EOF
+---
+plan_id: $pid
+author: primary
+drafted_at: 2026-06-11T00:00:00Z
+verdict: READY_TO_BUILD
+---
+## Approach
+Do A.
+## Key risks
+None.
+## Open questions
+None.
+EOF
+# blindness: a Secondary draft present BEFORE the seal must be refused
+printf 'x\n' > "$pd/secondary-draft.md.tmp"
+refused "seal refuses when Secondary drafted first (blindness)" "blindness" "$SC/plan" seal "$pid"
+rm -f "$pd/secondary-draft.md.tmp"
+"$SC/plan" seal "$pid" >/dev/null 2>&1; assert_eq "seal succeeds with a blind primary draft" 0 "$?"
+assert_eq "seal records .sealed" 1 "$([ -f "$pd/.sealed" ] && echo 1 || echo 0)"
+# submit refuses a bad verdict, then accepts a valid one
+cat > "$pd/secondary-draft.md.tmp" <<EOF
+---
+plan_id: $pid
+author: secondary
+drafted_at: 2026-06-11T00:00:01Z
+verdict: MAYBE
+---
+## Approach
+Do B.
+## Key risks
+None.
+## Open questions
+None.
+EOF
+refused "submit refuses a bad verdict" "verdict must be" "$SC/plan" submit "$pid"
+sed 's/verdict: MAYBE/verdict: NEEDS_WORK/' "$pd/secondary-draft.md.tmp" > "$pd/s.x" && mv "$pd/s.x" "$pd/secondary-draft.md.tmp"
+"$SC/plan" submit "$pid" >/dev/null 2>&1; assert_eq "submit publishes the Secondary draft" 0 "$?"
+assert_eq "Secondary draft published" 1 "$([ -f "$pd/secondary-draft.md" ] && echo 1 || echo 0)"
+"$SC/plan" reveal "$pid" >/dev/null 2>&1; assert_eq "reveal ok after submit" 0 "$?"
+"$SC/plan" synthesize "$pid" >/dev/null 2>&1; assert_eq "synthesize scaffolds plan.md" 0 "$?"
+# archive refuses while plan.md is still the unfilled scaffold
+"$SC/plan" archive "$pid" >/dev/null 2>&1; assert_eq "archive refuses an unfilled plan" 1 "$?"
+cat > "$pd/plan.md" <<EOF
+---
+plan_id: $pid
+synthesized_at: 2026-06-11T00:00:02Z
+final_verdict: READY_TO_BUILD
+contribution: added_value
+models: primary=a secondary=b
+---
+## Plan (the rubric for later review)
+A then B.
+## High-confidence (both drafts independently agreed)
+A.
+## Flagged decisions (the drafts diverged)
+B.
+## Contribution signal (what the Secondary's independent draft added)
+- net_new_options: B
+- caught_risks: none
+- verdict: added_value
+EOF
+"$SC/plan" archive "$pid" >/dev/null 2>&1; assert_eq "archive moves a filled plan" 0 "$?"
+assert_eq "plan archived" 1 "$([ -d "$SH/plans/archive/$pid" ] && echo 1 || echo 0)"
+
 echo
 echo "================ $PASS passed, $FAIL failed ================"
 [ "$FAIL" -eq 0 ]

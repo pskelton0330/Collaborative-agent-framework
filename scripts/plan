@@ -1,0 +1,155 @@
+#!/bin/sh
+# plan — collaborative planning (ADAPTIVE_COLLABORATION Phase 1), human-triggered.
+# A planning round runs BEFORE implementation: both agents draft a plan
+# independently and blind, then the Primary reveals and synthesizes. The synthesized
+# plan becomes the rubric the later implementation review checks against.
+#
+# This is a PARALLEL subsystem to the review flow (requests/responses). It reuses the
+# conventions (atomic staging, files-authoritative, status.json state, append-only
+# log) but not the review scripts, so it cannot destabilize the review contract.
+#
+# Flow (commit-reveal):
+#   plan new "<label>"      Primary: scaffold shared/plans/<id>/problem.md (state=planning)
+#   <fill problem.md; write your own primary-draft.md from templates/plan-draft.md>
+#   plan seal <id>          Primary: seal your blind draft (refuses if Secondary drafted
+#                           first, or your draft is unfilled). Hands the turn to Secondary.
+#   <Secondary reads problem.md ONLY, writes secondary-draft.md.tmp>
+#   plan submit <id>        Secondary: validate + publish its independent draft.
+#   plan reveal <id>        Primary: verify blindness (seal precedes the Secondary draft),
+#                           then surface both drafts for synthesis.
+#   plan synthesize <id>    Primary: scaffold plan.md (confidence-tagged + contribution signal).
+#   plan archive <id>       Primary: archive the round, reset state=idle.
+#   plan status [<id>]      Show planning state.
+set -eu
+. "$(cd "$(dirname "$0")" && pwd)/_common.sh"
+
+PLANS="$SHARED/plans"
+PARCH="$PLANS/archive"
+
+valid_plan_id() {
+  case "$1" in
+    PLAN-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+pdir() { printf '%s/%s' "$PLANS" "$1"; }
+need_dir() { [ -d "$(pdir "$1")" ] || { echo "no such plan: $1" >&2; exit 1; }; }
+# A draft/problem is "filled" if it no longer contains its angle-bracket placeholders.
+filled() { [ -f "$1" ] && ! grep -q '<[A-Za-z]' "$1"; }
+
+set_state() { # <state> <active_plan-or-null>
+  if [ "$HAVE_JQ" -eq 1 ]; then
+    if [ "$2" = null ]; then status_set ".state=\"$1\"" '.owner="primary"' '.updated_by="primary"' '.active_plan=null' || true
+    else status_set ".state=\"$1\"" ".active_plan=\"$2\"" '.updated_by="primary"' || true; fi
+  else
+    echo "(jq not found — set status.json: state=$1, active_plan=$2)" >&2
+  fi
+}
+
+sub=${1:-}; [ $# -gt 0 ] && shift || true
+case "$sub" in
+  new)
+    label=${1:-}; [ -n "$label" ] || { echo "usage: plan new \"<label>\"" >&2; exit 2; }
+    id="PLAN-$(date -u +%Y%m%d-%H%M%S)"
+    while [ -d "$(pdir "$id")" ] || [ -d "$PARCH/$id" ]; do sleep 1; id="PLAN-$(date -u +%Y%m%d-%H%M%S)"; done
+    d=$(pdir "$id"); mkdir -p "$d"
+    sed -e "s/^plan_id:.*/plan_id: $id/" -e "s/^created_at:.*/created_at: $(now_iso)/" \
+        -e "s/^label:.*/label: $label/" "$TEMPLATES/plan-problem.md" > "$d/problem.md"
+    set_state planning "$id"
+    log_append "PRIMARY" "PLAN_NEW" "Opened planning round: $label" "$id"
+    echo "$id"
+    echo "Next: fill $d/problem.md (problem only, no solution), write your blind draft to" >&2
+    echo "  $d/primary-draft.md (from templates/plan-draft.md), then: scripts/plan seal $id" >&2
+    ;;
+
+  seal)
+    id=${1:-}; valid_plan_id "$id" || { echo "bad plan id" >&2; exit 2; }; need_dir "$id"
+    d=$(pdir "$id")
+    [ -f "$d/.sealed" ] && { echo "already sealed: $id" >&2; exit 1; }
+    # Blindness gate: the Secondary must NOT have drafted yet.
+    { [ -e "$d/secondary-draft.md" ] || [ -e "$d/secondary-draft.md.tmp" ]; } && \
+      { echo "REFUSED: a Secondary draft already exists — blindness is broken for $id." >&2; exit 1; }
+    filled "$d/primary-draft.md" || { echo "REFUSED: $d/primary-draft.md is missing or still has placeholders." >&2; exit 1; }
+    now_iso > "$d/.sealed"
+    set_state planning "$id"   # owner stays primary in status, but it's the Secondary's turn now
+    log_append "PRIMARY" "PLAN_SEALED" "Primary blind draft sealed; Secondary may draft." "$id"
+    echo "Sealed $id at $(cat "$d/.sealed"). Secondary: read ONLY $d/problem.md, write"
+    echo "  $d/secondary-draft.md.tmp (from templates/plan-draft.md), then: scripts/plan submit $id"
+    ;;
+
+  submit)
+    id=${1:-}; valid_plan_id "$id" || { echo "bad plan id" >&2; exit 2; }; need_dir "$id"
+    d=$(pdir "$id"); tmp="$d/secondary-draft.md.tmp"; final="$d/secondary-draft.md"
+    [ -f "$d/.sealed" ] || { echo "REFUSED: Primary has not sealed its draft yet (commit-reveal order)." >&2; exit 1; }
+    [ -e "$final" ] && { echo "already submitted: $id" >&2; exit 1; }
+    [ -e "$tmp" ] || { echo "no staged draft. write it to: $tmp" >&2; exit 1; }
+    filled "$tmp" || { echo "REFUSED: $tmp still has placeholders." >&2; exit 1; }
+    case "$(fm_value "$tmp" verdict)" in
+      READY_TO_BUILD|NEEDS_WORK|REFRAME) : ;;
+      *) echo "REFUSED: verdict must be READY_TO_BUILD | NEEDS_WORK | REFRAME." >&2; exit 1 ;;
+    esac
+    for h in '## Approach' '## Key risks' '## Open questions'; do
+      grep -qF "$h" "$tmp" || { echo "REFUSED: missing section '$h'." >&2; exit 1; }
+    done
+    mv "$tmp" "$final"
+    log_append "SECONDARY" "PLAN_DRAFT" "Independent plan draft submitted ($(fm_value "$final" verdict))." "$id"
+    echo "Submitted Secondary draft for $id. Primary: scripts/plan reveal $id"
+    ;;
+
+  reveal)
+    id=${1:-}; valid_plan_id "$id" || { echo "bad plan id" >&2; exit 2; }; need_dir "$id"
+    d=$(pdir "$id")
+    [ -f "$d/.sealed" ] || { echo "REFUSED: nothing sealed for $id." >&2; exit 1; }
+    [ -f "$d/secondary-draft.md" ] || { echo "REFUSED: no Secondary draft yet for $id." >&2; exit 1; }
+    # Commit-reveal is verifiable: the seal timestamp must precede the Secondary draft.
+    seal_ts=$(cat "$d/.sealed"); sub_ts=$(fm_value "$d/secondary-draft.md" drafted_at)
+    if [ -n "$sub_ts" ] && [ "$seal_ts" \> "$sub_ts" ]; then
+      echo "WARNING: seal ($seal_ts) is AFTER the Secondary draft ($sub_ts) — blindness not verifiable." >&2
+    fi
+    : > "$d/.revealed"
+    log_append "PRIMARY" "PLAN_REVEAL" "Revealed drafts for synthesis." "$id"
+    echo "Revealed $id. Compare:"
+    echo "  primary  : $d/primary-draft.md"
+    echo "  secondary: $d/secondary-draft.md (verdict: $(fm_value "$d/secondary-draft.md" verdict))"
+    echo "Then: scripts/plan synthesize $id"
+    ;;
+
+  synthesize)
+    id=${1:-}; valid_plan_id "$id" || { echo "bad plan id" >&2; exit 2; }; need_dir "$id"
+    d=$(pdir "$id")
+    [ -f "$d/.revealed" ] || { echo "REFUSED: reveal first (scripts/plan reveal $id)." >&2; exit 1; }
+    [ -e "$d/plan.md" ] && { echo "plan.md already exists for $id" >&2; exit 1; }
+    sed -e "s/^plan_id:.*/plan_id: $id/" -e "s/^synthesized_at:.*/synthesized_at: $(now_iso)/" \
+        "$TEMPLATES/plan-synthesis.md" > "$d/plan.md"
+    log_append "PRIMARY" "PLAN_SYNTHESIZE" "Scaffolded synthesized plan." "$id"
+    echo "Scaffolded $d/plan.md — fill it (plan + high-confidence/divergences + contribution signal)."
+    echo "When done: scripts/plan archive $id"
+    ;;
+
+  archive)
+    id=${1:-}; valid_plan_id "$id" || { echo "bad plan id" >&2; exit 2; }; need_dir "$id"
+    filled "$(pdir "$id")/plan.md" || { echo "REFUSED: plan.md is missing or unfilled — synthesize first." >&2; exit 1; }
+    mkdir -p "$PARCH"; mv "$(pdir "$id")" "$PARCH/$id"
+    set_state idle null
+    log_append "PRIMARY" "PLAN_ARCHIVE" "Planning round archived; ready to implement." "$id/"
+    echo "Archived $id -> $PARCH/$id. State reset to idle; proceed to implementation."
+    ;;
+
+  status)
+    id=${1:-}
+    if [ -n "$id" ]; then
+      d=$(pdir "$id"); [ -d "$d" ] || { echo "no open plan $id (maybe archived)"; exit 0; }
+      echo "plan $id:"; for f in problem.md primary-draft.md secondary-draft.md plan.md; do
+        [ -e "$d/$f" ] && echo "  have $f" || echo "  --   $f"; done
+      [ -f "$d/.sealed" ] && echo "  sealed: $(cat "$d/.sealed")"
+    else
+      echo "open plans:"; found=0
+      for p in "$PLANS"/PLAN-*; do [ -d "$p" ] && { echo "  $(basename "$p")"; found=1; }; done
+      [ "$found" -eq 0 ] && echo "  (none)"
+    fi
+    ;;
+
+  ""|-h|--help|help)
+    awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next}{exit}' "$0" ;;
+  *) echo "unknown subcommand: $sub (try: plan --help)" >&2; exit 2 ;;
+esac

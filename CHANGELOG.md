@@ -5,6 +5,16 @@ All notable changes to this framework are recorded here. Dates are UTC.
 ## [Unreleased]
 
 ### Added
+- **Collaborative planning (ADAPTIVE_COLLABORATION Phase 1)** — a pre-implementation
+  planning phase where both agents draft a plan independently and blind, then the
+  Primary reveals and synthesizes. New `scripts/plan` CLI (new/seal/submit/reveal/
+  synthesize/archive/status), `shared/plans/` artifacts, three templates
+  (plan-problem/plan-draft/plan-synthesis), the `planning` state, and the spec in
+  `PLANNING.md`. Verdict vocab `READY_TO_BUILD/NEEDS_WORK/REFRAME`; commit-reveal
+  blindness is timestamp-verifiable; the synthesized plan records a **contribution
+  signal** (the Phase-2 gate / convergence-collapse alarm). Built as a *parallel*
+  subsystem — it does not touch the review request/response scripts. 14 new tests
+  (jq, no-jq, and dash legs).
 - **`scripts/doctor`** — read-only setup self-test: shared/ layout + writability,
   `status.json` validity, jq presence, orphaned `.draft`/`.tmp` staging files, the
   single-active invariant, script executability, and the `human_required` pause.

@@ -6,10 +6,12 @@ shared/requests/*
 shared/responses/*
 shared/escalation/*
 shared/archive/*
+shared/plans/*
 !shared/requests/.gitkeep
 !shared/responses/.gitkeep
 !shared/escalation/.gitkeep
 !shared/archive/.gitkeep
+!shared/plans/.gitkeep
 
 # Staging / temp files (atomic-write intermediates)
 *.draft

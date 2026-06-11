@@ -69,7 +69,12 @@ while `human_required: true` (§14).
 ```
 
 Valid `state` values: `idle`, `request_pending`, `in_review`, `response_ready`,
-`escalated`, `human_required`.
+`escalated`, `human_required`, `planning`.
+
+> `planning` belongs to the **collaborative planning** subsystem (a pre-implementation
+> phase), which is a parallel flow with its own script (`scripts/plan`) and artifacts
+> (`shared/plans/`). It reuses these conventions but not the review request/response
+> machinery. Its contract is in [`PLANNING.md`](PLANNING.md).
 
 ---
 

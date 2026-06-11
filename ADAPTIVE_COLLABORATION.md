@@ -1,11 +1,12 @@
 # ADAPTIVE_COLLABORATION — Design Direction
 
-**Status:** design direction, not yet implemented. `PROTOCOL.md` remains the
-authoritative contract for how the system behaves *today* (post-hoc peer review).
-This document records what we are evolving the framework toward, why, and in what
-order — so the rationale survives between sessions and guides the build.
+**Status:** design direction. **Phase 1 (collaborative planning) is now
+implemented** — see [`PLANNING.md`](PLANNING.md) for the shipped contract; this
+document remains the *rationale and roadmap*. Phases 2–3 (adaptive triggering,
+autonomy) are still design direction, gated on evidence from Phase 1 (the
+contribution signal). `PROTOCOL.md` is authoritative for the review flow.
 
-_Last updated: 2026-05-29._
+_Last updated: 2026-06-11._
 
 ---
 

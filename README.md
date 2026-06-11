@@ -145,6 +145,7 @@ agent-framework/
   README.md                  ← you are here
   PROTOCOL.md                ← the contract: state machine, lifecycle, safeguards, recovery
   THREAT_MODEL.md            ← adversarial dynamics: what it defends against, and why not sabotage
+  PLANNING.md                ← collaborative planning (Phase 1): blind drafts, reveal, contribution signal
   PRIMARY_AGENT.md           ← operating manual for the Primary Agent
   SECONDARY_AGENT.md         ← operating manual for the Secondary Agent
   EXAMPLE_WORKFLOW.md        ← worked examples + demo transcript + extension ideas
@@ -158,6 +159,7 @@ agent-framework/
     responses/               ← responses       (Secondary → Primary)
     escalation/              ← deeper-review escalation requests
     archive/                 ← completed exchanges, one folder per request id
+    plans/                   ← collaborative planning rounds (Phase 1); see PLANNING.md
 
   templates/                 ← copy-paste templates for requests/responses/startup prompts
     audit-request.md  audit-response.md  escalation-request.md
@@ -173,6 +175,7 @@ agent-framework/
     status                   ← pretty-print status.json + a work summary
     doctor                   ← setup self-test (shared state sane, jq, orphans, invariants)
     review-gate              ← optional pre-commit hook: warn/block on un-reviewed staged files
+    plan                     ← collaborative planning (Phase 1): blind-draft → reveal → synthesize
 
   tests/
     run-tests.sh             ← portable smoke harness (run under /bin/sh and dash)
