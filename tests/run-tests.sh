@@ -611,6 +611,31 @@ assert_eq "no transcript entry for a failed review" 0 "$([ -f "$SH/conversation.
 # --idle must be a positive integer, rejected BEFORE reaching watch (F5)
 "$SC/secondary-loop" --idle abc --once >/dev/null 2>&1; assert_eq "secondary-loop --idle abc exits 2 (not treated as idle)" 2 "$?"
 
+# validate-on-accept: an agent that writes an INVALID final response directly (bypassing
+# complete-request, or via prompt injection) must NOT be accepted as a completed review —
+# and the garbage file is discarded so it can't masquerade as "processed" and block retries.
+badstub="$SANDBOX/bad-secondary"
+printf '#!/bin/sh\nprintf "garbage, not a valid response\\n" > "$FRAMEWORK_DIR/shared/responses/$1.response.md"\n' > "$badstub"; chmod +x "$badstub"
+reset_state; rm -f "$SH/conversation.md"
+bid=$("$SC/new-request" --type bug-risk --files a 2>/dev/null); fill_draft "$SH/requests/$bid.md.draft"; "$SC/submit-request" "$bid" >/dev/null 2>&1
+SECONDARY_AGENT_CMD="$badstub" "$SC/secondary-loop" --once --idle 1 >/dev/null 2>&1; assert_eq "invalid direct-written response NOT accepted (exit 1)" 1 "$?"
+assert_eq "invalid response discarded (won't block the queue)" 0 "$([ -f "$SH/responses/$bid.response.md" ] && echo 1 || echo 0)"
+assert_eq "no transcript entry for an invalid response" 0 "$([ -f "$SH/conversation.md" ] && grep -q "$bid" "$SH/conversation.md" && echo 1 || echo 0)"
+# a structurally-VALID response but for the WRONG request_id is also rejected + discarded
+wrongstub="$SANDBOX/wrongid-secondary"
+cat > "$wrongstub" <<'WS'
+#!/bin/sh
+{ echo ---; echo "request_id: REQ-20200101-000000-bug-risk"; echo "responded_at: 2026-01-01T00:00:00Z"
+  echo "approval: APPROVED"; echo "risk: low"; echo "review_cycle: 1"; echo ---
+  echo "## Findings"; echo x; echo "## Recommended fixes"; echo x
+  echo "## Risk assessment"; echo x; echo "## Approval rationale"; echo x; } > "$FRAMEWORK_DIR/shared/responses/$1.response.md"
+WS
+chmod +x "$wrongstub"
+reset_state
+wid=$("$SC/new-request" --type bug-risk --files a 2>/dev/null); fill_draft "$SH/requests/$wid.md.draft"; "$SC/submit-request" "$wid" >/dev/null 2>&1
+SECONDARY_AGENT_CMD="$wrongstub" "$SC/secondary-loop" --once --idle 1 >/dev/null 2>&1; assert_eq "wrong-request_id response rejected (exit 1)" 1 "$?"
+assert_eq "wrong-id response discarded" 0 "$([ -f "$SH/responses/$wid.response.md" ] && echo 1 || echo 0)"
+
 # =====================================================================================
 echo "[16] init-from-seed (fresh clone bootstraps live runtime files from committed seeds)"
 reset_state
@@ -627,6 +652,194 @@ assert_eq "no leftover .tmp from atomic seeding"    0 "$(ls "$SH"/*.tmp.* 2>/dev
 reset_state; rm -f "$SH/status.json" "$SH/status.seed.json"
 "$SC/new-request" --type bug-risk --files x >/dev/null 2>&1
 assert_eq "no live file + no seed degrades gracefully (new-request works off defaults)" 0 "$?"
+
+# =====================================================================================
+echo "[17] archival-hygiene sweep (archive-resolved / resolved_unarchived_ids / doctor)"
+# set state=idle + active_request=null (JSON null) WITHOUT wiping request/response files
+set_idle() { sed 's/"state":[[:space:]]*"[^"]*"/"state": "idle"/; s/"active_request":[[:space:]]*"[^"]*"/"active_request": null/' "$SH/status.json" > "$SH/s.x" && mv "$SH/s.x" "$SH/status.json"; }
+# mkresolved <id> [approval] — a published request + published response, left un-archived
+mkresolved() {
+  "$SC/new-request" --type bug-risk --id "$1" --files a >/dev/null 2>&1
+  fill_draft "$SH/requests/$1.md.draft"
+  "$SC/submit-request" "$1" >/dev/null 2>&1
+  stage_response "$1" "${2:-APPROVED}" 1
+  "$SC/complete-request" "$1" >/dev/null 2>&1
+}
+reset_state
+mkresolved REQ-20990201-000000-bug-risk
+mkresolved REQ-20990202-000000-bug-risk
+set_idle
+
+# doctor counts the backlog (independent of jq — grep fallback works)
+assert_contains "doctor warns on un-archived backlog" "2 resolved exchange(s)" "$("$SC/doctor" 2>&1)"
+# F6: extra/unknown arg is rejected (not silently ignored)
+"$SC/archive-resolved" --dry-run junk >/dev/null 2>&1; assert_eq "archive-resolved rejects extra arg (F6)" 2 "$?"
+# no-jq: the sweep refuses (its idle assertion needs reliable parsing)
+AF_DISABLE_JQ=1 "$SC/archive-resolved" --dry-run >/dev/null 2>&1; assert_eq "archive-resolved refuses without jq" 4 "$?"
+
+if [ "$have_jq" -eq 1 ]; then
+  # happy path: idle + resolved backlog → dry-run lists both, then real sweep archives them
+  assert_contains "dry-run lists the backlog" "Would archive 2" "$("$SC/archive-resolved" --dry-run 2>&1)"
+  # F5: a partial status (missing keys) must fail the strict idle-tuple predicate
+  printf '{"state":"idle"}' > "$SH/status.json"
+  refused "partial status refused (F5)" "not a clean idle tuple" "$SC/archive-resolved" --dry-run
+  set_idle 2>/dev/null || true
+  # rebuild a clean idle status (seed) but keep the resolved files
+  cp "$SRC/shared/status.seed.json" "$SH/status.json"; set_idle
+  # F5: an outstanding unprocessed request (stale idle) must refuse
+  "$SC/new-request" --type bug-risk --id REQ-20990203-000000-bug-risk --files a >/dev/null 2>&1
+  fill_draft "$SH/requests/REQ-20990203-000000-bug-risk.md.draft"
+  "$SC/submit-request" REQ-20990203-000000-bug-risk >/dev/null 2>&1
+  set_idle   # status says idle but the request above is unprocessed
+  refused "stale-idle w/ unprocessed refused (F5)" "unprocessed request" "$SC/archive-resolved" --dry-run
+  # resolve it, back to clean idle, then the REAL sweep archives all resolved ids
+  stage_response REQ-20990203-000000-bug-risk APPROVED 1; "$SC/complete-request" REQ-20990203-000000-bug-risk >/dev/null 2>&1
+  set_idle
+  # snapshot live artifact BYTES before the sweep, to prove the archive preserves them exactly
+  for aid in REQ-20990201-000000-bug-risk REQ-20990202-000000-bug-risk REQ-20990203-000000-bug-risk; do
+    cp "$SH/requests/$aid.md" "$SANDBOX/snap.$aid.req"; cp "$SH/responses/$aid.response.md" "$SANDBOX/snap.$aid.resp"
+  done
+  "$SC/archive-resolved" >/dev/null 2>&1; assert_eq "sweep exits 0 when idle" 0 "$?"
+  n=0; for d in "$SH/archive"/REQ-2099020*; do [ -d "$d" ] && n=$((n+1)); done
+  assert_eq "sweep archived all 3 resolved exchanges" 3 "$n"
+  # content-preservation: each archive holds the BYTE-IDENTICAL request+response; live gone
+  intact=1
+  for aid in REQ-20990201-000000-bug-risk REQ-20990202-000000-bug-risk REQ-20990203-000000-bug-risk; do
+    cmp -s "$SH/archive/$aid/request.md"  "$SANDBOX/snap.$aid.req"  || intact=0
+    cmp -s "$SH/archive/$aid/response.md" "$SANDBOX/snap.$aid.resp" || intact=0
+    [ -e "$SH/requests/$aid.md" ] && intact=0
+    [ -e "$SH/responses/$aid.response.md" ] && intact=0
+  done
+  assert_eq "archives are byte-identical to originals; live pairs removed" 1 "$intact"
+  "$SC/doctor" >/dev/null 2>&1; assert_eq "doctor exits 0 after sweep" 0 "$?"
+  assert_eq "no backlog warning after sweep" 0 "$("$SC/doctor" 2>&1 | grep -c 'resolved exchange(s) not archived')"
+  # F5: refuse while a thread is in flight (active_request set, response_ready) — and prove
+  # the REAL (non-dry-run) refusal mutates NOTHING (a guard that prints but still moves fails).
+  reset_state
+  id=$("$SC/new-request" --type bug-risk --files a 2>/dev/null); fill_draft "$SH/requests/$id.md.draft"; "$SC/submit-request" "$id" >/dev/null 2>&1
+  stage_response "$id" APPROVED 1; "$SC/complete-request" "$id" >/dev/null 2>&1   # active_request=$id, response_ready
+  refused "in-flight thread refused (F5)" "not a clean idle tuple" "$SC/archive-resolved" --dry-run
+  "$SC/archive-resolved" >/dev/null 2>&1; rc=$?
+  assert_eq "in-flight: real sweep refused (nonzero)" 1 "$([ "$rc" -ne 0 ] && echo 1 || echo 0)"
+  assert_eq "in-flight: response NOT moved by refusal" 1 "$([ -f "$SH/responses/$id.response.md" ] && echo 1 || echo 0)"
+  assert_eq "in-flight: no archive created by refusal" 0 "$([ -d "$SH/archive/$id" ] && echo 1 || echo 0)"
+  # F5: paused system — the REAL (non-dry-run) sweep must refuse AND mutate nothing.
+  reset_state; mkresolved REQ-20990301-000000-bug-risk; set_idle; set_bool human_required true
+  "$SC/archive-resolved" >/dev/null 2>&1; prc=$?
+  assert_eq "paused: real sweep refused (nonzero)"       1 "$([ "$prc" -ne 0 ] && echo 1 || echo 0)"
+  assert_eq "paused: response NOT moved by refusal"      1 "$([ -f "$SH/responses/REQ-20990301-000000-bug-risk.response.md" ] && echo 1 || echo 0)"
+  assert_eq "paused: no archive created by refusal"      0 "$([ -d "$SH/archive/REQ-20990301-000000-bug-risk" ] && echo 1 || echo 0)"
+fi
+
+# =====================================================================================
+echo "[18] secondary-loop conversation.md rotation"
+reset_state
+rm -f "$SH/conversation.md" "$SH/conversation.md.1" "$SH/conv.orig"
+awk 'BEGIN{for(i=0;i<40;i++) print "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}' > "$SH/conversation.md"  # ~2KB
+cp "$SH/conversation.md" "$SH/conv.orig"                              # snapshot original bytes
+# F1 regression: a human-paused system must NOT rotate (no automation while paused).
+set_bool human_required true
+AF_CONV_MAX_KB=1 "$SC/secondary-loop" --once --idle 1 >/dev/null 2>&1
+assert_eq "paused system does NOT rotate (F1)"        0 "$([ -f "$SH/conversation.md.1" ] && echo 1 || echo 0)"
+assert_eq "paused: live conversation.md untouched"    0 "$(cmp -s "$SH/conversation.md" "$SH/conv.orig" && echo 0 || echo 1)"
+# unpaused + over cap: rotates, and .1 holds the ORIGINAL bytes, live file is gone.
+set_bool human_required false; set_str state idle
+AF_CONV_MAX_KB=1 "$SC/secondary-loop" --once --idle 1 >/dev/null 2>&1
+assert_eq "over-cap rotated to .1"                    1 "$([ -f "$SH/conversation.md.1" ] && echo 1 || echo 0)"
+assert_eq ".1 preserves the original bytes"           0 "$(cmp -s "$SH/conversation.md.1" "$SH/conv.orig" && echo 0 || echo 1)"
+assert_eq "live conversation.md moved away"           0 "$([ -f "$SH/conversation.md" ] && echo 1 || echo 0)"
+# under-cap: not rotated, live file byte-for-byte intact.
+rm -f "$SH/conversation.md" "$SH/conversation.md.1" "$SH/conv.orig"
+printf 'tiny\n' > "$SH/conversation.md"; cp "$SH/conversation.md" "$SH/conv.orig"
+AF_CONV_MAX_KB=512 "$SC/secondary-loop" --once --idle 1 >/dev/null 2>&1
+assert_eq "under-cap not rotated"                     0 "$([ -f "$SH/conversation.md.1" ] && echo 1 || echo 0)"
+assert_eq "under-cap live file unchanged"             0 "$(cmp -s "$SH/conversation.md" "$SH/conv.orig" && echo 0 || echo 1)"
+# rotation FAILURE must WARN but NOT abort the watcher (regression: maybe_rotate_conv returns
+# 1, and a bare call under set -e would kill the loop). Force failure: .1 is a non-regular file.
+rm -f "$SH/conversation.md" "$SH/conversation.md.1"
+awk 'BEGIN{for(i=0;i<40;i++) print "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"}' > "$SH/conversation.md"  # >1 KiB
+mkdir -p "$SH/conversation.md.1/blocker"              # .1 is a directory → rotation cannot mv into it
+AF_CONV_MAX_KB=1 "$SC/secondary-loop" --once --idle 1 >/dev/null 2>&1
+assert_eq "rotation failure warns but does NOT abort the watcher (exit 0)" 0 "$?"
+rm -rf "$SH/conversation.md.1"
+# F4 integration: a real review whose transcript APPEND crosses the cap must rotate. Starts
+# UNDER cap (so startup rotation does not fire), then the stub's published response triggers
+# append_transcript, which crosses 1 KiB and drives the in-loop rotation. Removing the
+# per-append maybe_rotate_conv call makes this FAIL (that call is the thing under test).
+reset_state; rm -f "$SH/conversation.md" "$SH/conversation.md.1"
+head -c 1000 /dev/zero | tr '\0' y > "$SH/conversation.md"          # 1000 B < 1 KiB at startup
+hidr=$("$SC/new-request" --type bug-risk --files a 2>/dev/null); fill_draft "$SH/requests/$hidr.md.draft"; "$SC/submit-request" "$hidr" >/dev/null 2>&1
+AF_CONV_MAX_KB=1 SECONDARY_AGENT_CMD="$stub" "$SC/secondary-loop" --once --idle 1 >/dev/null 2>&1
+assert_eq "per-append rotation fires when a review crosses the cap (F4)" 1 "$([ -f "$SH/conversation.md.1" ] && echo 1 || echo 0)"
+# F1 integration: a stub that PAUSES the system mid-review must leave the transcript/log
+# unmutated for that review (post-agent pause re-check).
+reset_state; rm -f "$SH/conversation.md"
+pausestub="$SANDBOX/pause-secondary"
+cat > "$pausestub" <<'PS'
+#!/bin/sh
+id=$1; sh="$FRAMEWORK_DIR/shared"; sc="$FRAMEWORK_DIR/scripts"
+{ echo '---'; echo "request_id: $id"; echo 'responded_at: 2026-06-11T00:00:00Z'
+  echo 'approval: APPROVED'; echo 'risk: low'; echo 'review_cycle: 1'
+  echo 'unresolved: []'; echo 'resolved_since: []'; echo 'new_this_cycle: []'
+  echo 'movement: false'; echo 'progress_continuity: unknown'; echo '---'
+  echo '## Findings'; echo 'x'; echo '## Recommended fixes'; echo 'x'
+  echo '## Risk assessment'; echo 'x'; echo '## Approval rationale'; echo 'x'
+} > "$sh/responses/$id.response.md.tmp"
+"$sc/complete-request" "$id" >/dev/null 2>&1
+sed 's/"human_required": false/"human_required": true/' "$sh/status.json" > "$sh/s.x" && mv "$sh/s.x" "$sh/status.json"
+PS
+chmod +x "$pausestub"
+hidp=$("$SC/new-request" --type bug-risk --files a 2>/dev/null); fill_draft "$SH/requests/$hidp.md.draft"; "$SC/submit-request" "$hidp" >/dev/null 2>&1
+SECONDARY_AGENT_CMD="$pausestub" "$SC/secondary-loop" --once --idle 1 >/dev/null 2>&1
+assert_eq "pause established mid-review → no transcript entry (F1)" 0 "$([ -f "$SH/conversation.md" ] && grep -q "$hidp" "$SH/conversation.md" && echo 1 || echo 0)"
+
+# =====================================================================================
+echo "[19] concurrent sessions: AF_STATE_DIR isolation + single-watcher lock"
+reset_state   # clear any leftover master requests so the "untouched" assertion is meaningful
+# seeds must exist in the framework's shared/ for a fresh AF_STATE_DIR to bootstrap from
+cp "$SRC/shared/status.seed.json" "$SH/status.seed.json"
+cp "$SRC/shared/master-log.seed.md" "$SH/master-log.seed.md"
+rm -rf "$SH/runs"; A="$SH/runs/sessA"; B="$SH/runs/sessB"
+# a fresh AF_STATE_DIR bootstraps its OWN layout + seeded status.json (from the framework seed)
+AF_STATE_DIR="$A" "$SC/doctor" >/dev/null 2>&1
+assert_eq "fresh AF_STATE_DIR created its own status.json" 1 "$([ -f "$A/status.json" ] && echo 1 || echo 0)"
+assert_eq "fresh AF_STATE_DIR created requests/ layout"    1 "$([ -d "$A/requests" ] && echo 1 || echo 0)"
+# two sessions create requests independently; neither sees the other; master shared/ untouched
+ra=$(AF_STATE_DIR="$A" "$SC/new-request" --type bug-risk --files a 2>/dev/null)
+rb=$(AF_STATE_DIR="$B" "$SC/new-request" --type security  --files b 2>/dev/null)
+assert_eq "session A holds only its own request" 1 "$([ -f "$A/requests/$ra.md.draft" ] && [ ! -e "$B/requests/$ra.md.draft" ] && echo 1 || echo 0)"
+assert_eq "session B holds only its own request" 1 "$([ -f "$B/requests/$rb.md.draft" ] && [ ! -e "$A/requests/$rb.md.draft" ] && echo 1 || echo 0)"
+assert_eq "master shared/ untouched by isolated sessions" 0 "$(ls "$SH"/requests/REQ-* 2>/dev/null | wc -l | tr -d ' ')"
+# single-watcher lock is an atomic mkdir of a DIRECTORY ($SHARED/.watcher.lock) holding the
+# owner pid. A LIVE owner makes a second watcher refuse (exit 5, before the blocking loop —
+# so a foreground call returns deterministically).
+mkdir -p "$A/.watcher.lock"; echo $$ > "$A/.watcher.lock/pid"   # $$ = this shell, alive
+AF_STATE_DIR="$A" "$SC/secondary-loop" --idle 1 >/dev/null 2>&1; assert_eq "2nd persistent watcher refused (exit 5)" 5 "$?"
+# --once ALSO contends now (a --once review is not short if it runs a full agent review)
+AF_STATE_DIR="$A" "$SC/secondary-loop" --once --idle 1 >/dev/null 2>&1; assert_eq "--once refused while a live watcher holds the lock" 5 "$?"
+# doctor distinguishes a stale lock (dead owner) from a live one; 999999 is beyond the pid range
+echo 999999 > "$A/.watcher.lock/pid"
+assert_contains "doctor flags a stale watcher lock" "stale" "$(AF_STATE_DIR="$A" "$SC/doctor" 2>&1)"
+echo $$ > "$A/.watcher.lock/pid"
+assert_contains "doctor sees a live watcher"        "one watcher active" "$(AF_STATE_DIR="$A" "$SC/doctor" 2>&1)"
+rm -rf "$A/.watcher.lock"
+# NO auto-reclaim (race-free by construction): ANY existing lock dir makes a new watcher
+# refuse — even a stale one. The operator clears it (doctor says how).
+mkdir -p "$A/.watcher.lock"; echo 999999 > "$A/.watcher.lock/pid"        # stale (dead owner)
+AF_STATE_DIR="$A" "$SC/secondary-loop" --once --idle 1 >/dev/null 2>&1; assert_eq "stale lock refused, not reclaimed (fail-closed)" 5 "$?"
+# a lock dir with NO pid file (crash between mkdir and pid write) also refuses, not aborts
+rm -f "$A/.watcher.lock/pid"
+AF_STATE_DIR="$A" "$SC/secondary-loop" --once --idle 1 >/dev/null 2>&1; assert_eq "pid-less lock still refuses (exit 5, no set -e abort)" 5 "$?"
+assert_contains "doctor flags a pid-less lock as stale" "stale" "$(AF_STATE_DIR="$A" "$SC/doctor" 2>&1)"
+# after the operator clears the lock, a fresh --once claims, runs, and releases it
+rm -rf "$A/.watcher.lock"
+AF_STATE_DIR="$A" SECONDARY_AGENT_CMD="$stub" "$SC/secondary-loop" --once --idle 1 >/dev/null 2>&1; assert_eq "after clearing the lock, --once runs (exit 0)" 0 "$?"
+assert_eq "owner released its lock on exit" 0 "$([ -d "$A/.watcher.lock" ] && echo 1 || echo 0)"
+# F5: a RELATIVE AF_STATE_DIR is rejected (resolves differently per cwd)
+AF_STATE_DIR="relative/notabs" "$SC/doctor" >/dev/null 2>&1; assert_eq "relative AF_STATE_DIR rejected (exit 2)" 2 "$?"
+# F4: an UNUSABLE AF_STATE_DIR (parent is a file) fails fast rather than degrading
+printf x > "$SH/notadir"; AF_STATE_DIR="$SH/notadir/sub" "$SC/doctor" >/dev/null 2>&1; assert_eq "unusable AF_STATE_DIR fails fast (exit 2)" 2 "$?"; rm -f "$SH/notadir"
+rm -rf "$SH/runs" "$SH/status.seed.json" "$SH/master-log.seed.md"
 
 echo
 echo "================ $PASS passed, $FAIL failed ================"

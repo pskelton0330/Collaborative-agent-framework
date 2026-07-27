@@ -32,3 +32,11 @@ shared/master-log.md
 shared/conversation.md
 shared/.stop-secondary
 shared/*.out
+shared/*.out.1
+shared/conversation.md.1
+shared/.watcher.pid
+
+# Per-session isolated coordination state (AF_STATE_DIR). Each concurrent /collab session
+# gets its own shared/runs/<session-id>/ subtree so multiple Primaries never collide.
+# Entirely runtime — never committed.
+shared/runs/

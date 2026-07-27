@@ -177,6 +177,39 @@ touch shared/.stop-secondary
 
 ---
 
+## Running multiple sessions at once (concurrency)
+
+The coordination state (`status.json`, `requests/`, `responses/`, `master-log.md`,
+`archive/`) is a **single-owner state machine** — one active request, one owner. Two
+Primaries pointed at the *same* state will collide: they fight over `active_request`, one
+watcher picks up the other's requests, and the shared log interleaves. (The safety
+invariants hold — the single-active guard and pairing rule fail *safe*, not silently — but
+it's confusing and wasteful.)
+
+To run several sessions **concurrently**, give each its own state with **`AF_STATE_DIR`**:
+
+```sh
+# session 1
+export AF_STATE_DIR="$PWD/agent-framework/shared/runs/session-1"
+scripts/secondary-loop --provider codex &         # watches only session-1's state
+# session 2 (another terminal / another agent)
+export AF_STATE_DIR="$PWD/agent-framework/shared/runs/session-2"
+scripts/secondary-loop --provider claude &        # watches only session-2's state
+```
+
+The framework **code** (scripts, templates) stays shared and read-only; only the live
+state is per-session. A fresh `AF_STATE_DIR` is bootstrapped automatically (seeded from
+the framework's `shared/`), so there is nothing to set up. Unset `AF_STATE_DIR` keeps the
+old behavior (state in `shared/`) — fine for a single session. The `/collab` skill sets a
+unique `AF_STATE_DIR` per session automatically.
+
+As a backstop against accidental sharing, `secondary-loop` takes a **single-watcher lock**
+(`$AF_STATE_DIR/.watcher.pid`): a second persistent watcher on the same state dir refuses
+to start (exit 5) instead of double-processing. `scripts/doctor` reports the lock and
+flags a stale one. A crashed watcher's lock is reclaimed automatically on the next start.
+
+---
+
 ## Folder layout
 
 ```

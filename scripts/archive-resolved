@@ -1,0 +1,101 @@
+#!/bin/sh
+# archive-resolved — wind-down sweep: archive EVERY resolved-but-un-archived exchange
+# in one call. A "resolved" exchange is one whose Secondary response was published but
+# the Primary never archived (its *.response.md still sits in shared/responses/). Over a
+# long session these accumulate — the records showed dozens — cluttering responses/ and
+# slowing reconciliation. This closes them all at once at wind-down.
+#
+#   archive-resolved [--dry-run]
+#
+# It delegates the actual moves to archive-request, so it inherits that script's
+# two-phase "validate everything before moving anything" guarantee and its status reset
+# (status returns to idle when the active_request is among the swept ids). Requests that
+# are still UNPROCESSED (no response yet) are deliberately left untouched — they are live
+# work, not backlog. Exit 0 when there was nothing to do.
+#
+# Known accepted limitations (bounded, recovery-only, manual-invocation):
+#   1. If status.json is DELETED entirely, _common.sh re-seeds a pristine idle status
+#      before this guard runs, so a lost-status recovery could pass the idle check.
+#      Mitigation: the unprocessed-request backstop still refuses if any live request
+#      exists; and this is a manual wind-down tool — reconcile (startup §14) after any
+#      status loss before sweeping.
+#   2. The idle-tuple check and the archive moves are not one atomic transaction, so a
+#      Primary that activates a new thread in the instant between them races this sweep.
+#      In practice the Primary runs this at wind-down when it is not concurrently starting
+#      work. A coordination lock was judged disproportionate for a convenience tool.
+set -eu
+. "$(cd "$(dirname "$0")" && pwd)/_common.sh"
+
+DRY=0
+usage() { echo "Usage: archive-resolved [--dry-run]" >&2; exit "${1:-2}"; }
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dry-run) DRY=1; shift ;;
+    -h|--help) usage 0 ;;
+    *) echo "Unknown or unexpected arg: $1" >&2; usage 2 ;;
+  esac
+done
+
+# Refuse to sweep unless the system is provably QUIESCENT. archive-resolved is a
+# WIND-DOWN tool: it only sweeps genuinely-past backlog. It POSITIVELY asserts the idle
+# tuple (state=idle AND active_request=null AND human_required=false) rather than trusting
+# any single flag — so a missing/corrupt/parse-failed status, which json_get would map to
+# permissive defaults, fails CLOSED here instead of licensing a sweep. This is what keeps
+# a live thread from being split mid-flight (F1) and keeps the no-jq stale-status path
+# from ever archiving the active id (F5). Reconcile first (startup §14 / `doctor`) if this
+# refuses unexpectedly. Requires jq: the positive assertion needs reliable parsing, and
+# the delegated archive's status reset is a no-op here anyway (no swept id is active).
+if [ "$HAVE_JQ" -ne 1 ]; then
+  echo "Refusing: archive-resolved needs jq to verify the system is idle before sweeping." >&2
+  echo "Install jq, or archive resolved threads individually with archive-request." >&2
+  exit 4
+fi
+# Assert the idle tuple with a SINGLE strict jq predicate: the object must carry all three
+# fields with the exact expected values/types. This fails CLOSED on a partial status (e.g.
+# `{"state":"idle"}` with the other keys absent), a wrongly-typed field, or unparseable
+# JSON — none of which json_get's per-key defaults would have caught.
+if [ "$(json_get '.human_required' false)" = "true" ]; then
+  echo "Refusing: human_required=true (automation paused). Clear the pause first." >&2
+  exit 3
+fi
+if ! jq -e '.state=="idle" and .active_request==null and .human_required==false' "$STATUS" >/dev/null 2>&1; then
+  echo "Refusing: status.json is not a clean idle tuple" >&2
+  echo "(need exactly state=\"idle\", active_request=null, human_required=false)." >&2
+  echo "Resolve/archive any active thread, clear any pause, and reconcile (run 'doctor')." >&2
+  exit 1
+fi
+# File-authoritative backstop: even a byte-perfect idle tuple can be STALE. If any request
+# is unprocessed (published, no response yet), a thread is really live regardless of what
+# status claims — refuse. This closes the stale-idle-with-outstanding-re-audit case.
+if [ -n "$(unprocessed_ids)" ]; then
+  echo "Refusing: unprocessed request(s) outstanding despite idle status — status is stale." >&2
+  echo "Reconcile (run 'doctor') and resolve the live request(s) before sweeping." >&2
+  exit 1
+fi
+
+ids=$(resolved_unarchived_ids)
+if [ -z "$ids" ]; then
+  echo "Nothing to archive — no resolved un-archived exchanges."
+  exit 0
+fi
+
+# Turn the newline-separated id list into safe positional parameters. `set -f` disables
+# pathname expansion so no id can re-glob against the cwd (F2), and IFS=newline splits
+# ONLY on lines. The ids are already valid_id-checked by the helper; this is defense in
+# depth so nothing downstream depends on the enumerator being the only guard.
+set -f
+oldIFS=$IFS; IFS='
+'
+# shellcheck disable=SC2086  # deliberate: split $ids on newline into "$@", noglob active.
+set -- $ids
+IFS=$oldIFS
+set +f
+
+if [ "$DRY" -eq 1 ]; then
+  echo "Would archive $# resolved exchange(s):"
+  printf '  %s\n' "$@"
+  exit 0
+fi
+
+echo "Archiving $# resolved exchange(s)..."
+exec "$FRAMEWORK_DIR/scripts/archive-request" "$@"

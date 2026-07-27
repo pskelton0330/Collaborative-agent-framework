@@ -12,6 +12,7 @@ bad()  { printf '  FAIL  %s\n' "$1"; fail=$((fail + 1)); }
 
 echo "== agent-framework doctor =="
 echo "   framework: $FRAMEWORK_DIR"
+[ "$SHARED" != "$FRAMEWORK_DIR/shared" ] && echo "   state dir: $SHARED (isolated via AF_STATE_DIR)"
 
 # 1. Shared layout exists and is writable.
 for d in "$SHARED" "$REQUESTS" "$RESPONSES" "$ESCALATION" "$ARCHIVE" "$TEMPLATES"; do
@@ -59,6 +60,76 @@ done
 hr=$(json_get '.human_required' false)
 [ "$hr" = "true" ] && wn "human_required=true — automation is paused until a human clears it" \
                    || ok "automation not paused (human_required=false)"
+
+# 7b. Watcher lock: a live watcher on this state dir is normal; a STALE lock (its owner
+#     process is gone) is left by a crashed watcher and is safe to remove. The lock is a
+#     DIRECTORY ($SHARED/.watcher.lock) holding the owner pid — validate the pid before
+#     kill -0 so a garbled token reads as stale, never crashes the check.
+wld="$SHARED/.watcher.lock"
+if [ -d "$wld" ]; then
+  # Guarded read (|| echo): a lock dir with a missing/unreadable pid file must not abort
+  # doctor under set -e — it reads as an invalid token (stale) below.
+  wpid=$(cat "$wld/pid" 2>/dev/null || echo)
+  case "$wpid" in
+    ''|*[!0-9]*) wn "watcher lock present but owner pid is missing/invalid ('$wpid') — stale; remove with: rm -rf $wld" ;;
+    *) if kill -0 "$wpid" 2>/dev/null; then ok "one watcher active on this state dir (pid $wpid)"
+       else wn "stale watcher lock ($wld, owner pid $wpid not running) — safe to: rm -rf $wld"; fi ;;
+  esac
+else
+  ok "no watcher lock present (no headless Secondary running here)"
+fi
+
+# 8. Resolved-but-un-archived backlog. A completed review whose response still sits in
+#    responses/ is fine individually, but a pile of them clutters the dir, slows
+#    reconciliation, and hides real state. Advisory: `archive-resolved` clears it.
+backlog=$(resolved_unarchived_ids | grep -c . || true)
+if [ "$backlog" -eq 0 ]; then ok "no resolved-but-un-archived exchanges"
+else wn "$backlog resolved exchange(s) not archived — run scripts/archive-resolved to sweep"; fi
+
+# 9. Oversized runtime logs. These append forever; past a soft cap they bloat the dir
+#    and any tool that reads them. conversation.md is rotated by secondary-loop; the
+#    *.out redirect targets are rotated by the launcher — flag any that grew large,
+#    including rotated backups (*.1) and hidden variants (a stray `.secondary-loop.out`).
+LOG_WARN_KB=${AF_LOG_WARN_KB:-512}
+# Reject non-digits AND digit-only values too large to compare safely (a 24-digit value
+# overflows shell arithmetic under dash → "Illegal number", which would silently skip the
+# size classification). Cap at <10 digits (<10 TB), far above any real log, always safe.
+case "$LOG_WARN_KB" in
+  ''|*[!0-9]*)   wn "AF_LOG_WARN_KB='$LOG_WARN_KB' is not a non-negative integer — using 512"; LOG_WARN_KB=512 ;;
+  ??????????*)   wn "AF_LOG_WARN_KB='$LOG_WARN_KB' is out of range — using 512"; LOG_WARN_KB=512 ;;
+esac
+big=""
+for lf in "$SHARED/conversation.md" "$SHARED/conversation.md.1" "$LOG" \
+          "$SHARED"/*.out "$SHARED"/*.out.1 "$SHARED"/.*.out "$SHARED"/.*.out.1; do
+  [ -f "$lf" ] || continue
+  # Explicit read: an unreadable log must WARN (actionable), not silently read as 0 bytes.
+  if bytes=$(wc -c < "$lf" 2>/dev/null); then
+    kb=$(( bytes / 1024 ))
+    [ "$kb" -ge "$LOG_WARN_KB" ] && big="$big $(basename "$lf")(${kb}KB)"
+  else
+    big="$big $(basename "$lf")(unreadable)"
+  fi
+done
+[ -z "$big" ] && ok "runtime logs under ${LOG_WARN_KB}KB" \
+             || wn "large/unreadable runtime log(s):$big — rotate/trim (cap: AF_LOG_WARN_KB)"
+
+# 10. Stray non-protocol files in shared/. Work artifacts (diffs, drafts) dumped into the
+#     coordination dir aren't acted on but they clutter it and confuse reconciliation.
+#     Warn on any top-level file that isn't part of the protocol/runtime set. Iterates
+#     hidden entries too (a plain `*` glob skips them), so hidden strays are caught and
+#     the allowlisted dotfile arms are actually reachable.
+stray=""
+for e in "$SHARED"/* "$SHARED"/.*; do
+  [ -e "$e" ] || continue
+  [ -d "$e" ] && continue                 # dirs (incl. . and ..) — requests/responses/etc.
+  case "$(basename "$e")" in
+    status.json|status.seed.json|master-log.md|master-log.seed.md|conversation.md|conversation.md.1) : ;;
+    *.out|*.out.1|.stop-secondary|.gitkeep|.gitignore) : ;;  # runtime/rotated/transient
+    *) stray="$stray $(basename "$e")" ;;
+  esac
+done
+[ -z "$stray" ] && ok "no stray non-protocol files in shared/" \
+               || wn "stray file(s) in shared/:$stray — move work artifacts out of the coordination dir"
 
 echo "== summary =="
 echo "  $pass ok, $warn warn, $fail fail"

@@ -10,27 +10,34 @@ set -eu
 . "$(cd "$(dirname "$0")" && pwd)/_common.sh"
 
 PROVIDER="${SECONDARY_PROVIDER:-codex}"; MODEL="${SECONDARY_MODEL:-}"; ID=""
+# Reasoning effort for codex reviews. The user's global codex config often defaults to
+# "ultra" (maximum depth = 5-8 min/review); a headless peer review of a few files does not
+# need that. Default to "high" — noticeably faster than ultra while keeping strong depth
+# (drop to medium/low for quick iteration, or bump to ultra for a deliberate deep audit).
+# Override via SECONDARY_REASONING_EFFORT or --effort. Only applies to codex (claude has no flag).
+EFFORT="${SECONDARY_REASONING_EFFORT:-high}"
 needval() { [ "$1" -ge 2 ] && [ "${2#-}" = "$2" ] || { echo "$3 needs a value" >&2; exit 2; }; }
 while [ $# -gt 0 ]; do
   case "$1" in
     --provider) needval "$#" "${2-}" --provider; PROVIDER=$2; shift 2 ;;
     --model) needval "$#" "${2-}" --model; MODEL=$2; shift 2 ;;
+    --effort) needval "$#" "${2-}" --effort; EFFORT=$2; shift 2 ;;
     -h|--help) awk 'NR==1{next}/^#/{sub(/^# ?/,"");print;next}{exit}' "$0"; exit 0 ;;
     -*) echo "unknown arg: $1" >&2; exit 2 ;;
     *) ID=$1; shift ;;
   esac
 done
-[ -n "$ID" ] || { echo "usage: secondary-agent <request-id> [--provider codex|claude] [--model M]" >&2; exit 2; }
+[ -n "$ID" ] || { echo "usage: secondary-agent <request-id> [--provider codex|claude] [--model M] [--effort ultra|high|medium|low]" >&2; exit 2; }
 valid_id "$ID" || { echo "bad request id: $ID" >&2; exit 2; }
 [ -e "$REQUESTS/$ID.md" ] || [ -e "$ESCALATION/$ID.escalation.md" ] || { echo "no published request: $ID" >&2; exit 1; }
 
-PROMPT="You are the SECONDARY reviewer in a file-based two-agent framework at $FRAMEWORK_DIR. READ-ONLY peer review: you review and write a response file; you NEVER edit project files. Read $FRAMEWORK_DIR/PROTOCOL.md and $FRAMEWORK_DIR/SECONDARY_AGENT.md for the rules.
+PROMPT="You are the SECONDARY reviewer in a file-based two-agent framework at $FRAMEWORK_DIR. READ-ONLY peer review: you review and write ONE response file; you NEVER edit the reviewed files. Everything you need is in this prompt — do NOT read PROTOCOL.md or SECONDARY_AGENT.md (they are the framework's internal coordination rules, not needed to review code, and reading them wastes time). If a re-audit request carries prior findings, reuse their finding-ids for the same concerns; progress fields are: unresolved (ids still open), resolved_since (ids closed this cycle), new_this_cycle (ids raised this cycle), movement (advisory bool), progress_continuity (ok|unknown).
 
 Review request $ID:
-1. Read $FRAMEWORK_DIR/shared/requests/$ID.md (or escalation/$ID.escalation.md).
+1. Read $REQUESTS/$ID.md (or $ESCALATION/$ID.escalation.md).
 2. Review ONLY the files it lists, honoring its review scope. Be genuinely critical.
-3. Write your response to $FRAMEWORK_DIR/shared/responses/$ID.response.md.tmp using the contract in $FRAMEWORK_DIR/templates/audit-response.md: front-matter request_id=$ID, responded_at (UTC, from: date -u +%Y-%m-%dT%H:%M:%SZ), approval (APPROVED|APPROVED_WITH_CONCERNS|BLOCKED), risk (low|medium|high), review_cycle matching the request's review_cycle, and the five progress fields (unresolved/resolved_since/new_this_cycle/movement/progress_continuity) with safe cycle-1 defaults unless this is a re-audit. Body sections (all non-empty): '## Findings', '## Recommended fixes', '## Risk assessment', '## Approval rationale'.
-4. Publish it: cd $FRAMEWORK_DIR && scripts/complete-request $ID  (fix the .tmp and rerun if it reports validation errors).
+3. Write your response to $RESPONSES/$ID.response.md.tmp using the contract in $FRAMEWORK_DIR/templates/audit-response.md: front-matter request_id=$ID, responded_at (UTC, from: date -u +%Y-%m-%dT%H:%M:%SZ), approval (APPROVED|APPROVED_WITH_CONCERNS|BLOCKED), risk (low|medium|high), review_cycle matching the request's review_cycle, and the five progress fields (unresolved/resolved_since/new_this_cycle/movement/progress_continuity) with safe cycle-1 defaults unless this is a re-audit. Body sections (all non-empty): '## Findings', '## Recommended fixes', '## Risk assessment', '## Approval rationale'.
+4. Publish it: cd $FRAMEWORK_DIR && AF_STATE_DIR='$SHARED' scripts/complete-request $ID  (fix the .tmp and rerun if it reports validation errors).
 Do not edit the reviewed files. Print your verdict (approval + risk) when done."
 
 case "$PROVIDER" in
@@ -40,10 +47,13 @@ case "$PROVIDER" in
     # pauses (a prompt would hang the headless loop); `-s workspace-write` keeps the
     # review bot able to read anywhere + write only the response under the framework
     # dir — it cannot write into your project, which matches its read-only-reviewer role.
+    # -c model_reasoning_effort="$EFFORT" overrides the user's global default (often "ultra",
+    # which is minutes/review) so headless reviews run at a sane depth. Override via
+    # SECONDARY_REASONING_EFFORT / --effort.
     if [ -n "$MODEL" ]; then
-      printf '%s' "$PROMPT" | codex exec --skip-git-repo-check -s workspace-write -c approval_policy=never -C "$FRAMEWORK_DIR" -m "$MODEL" -
+      printf '%s' "$PROMPT" | codex exec --skip-git-repo-check -s workspace-write -c approval_policy=never -c model_reasoning_effort="$EFFORT" -C "$FRAMEWORK_DIR" -m "$MODEL" -
     else
-      printf '%s' "$PROMPT" | codex exec --skip-git-repo-check -s workspace-write -c approval_policy=never -C "$FRAMEWORK_DIR" -
+      printf '%s' "$PROMPT" | codex exec --skip-git-repo-check -s workspace-write -c approval_policy=never -c model_reasoning_effort="$EFFORT" -C "$FRAMEWORK_DIR" -
     fi
     ;;
   claude)

@@ -49,6 +49,42 @@ STOP="$SHARED/.stop-secondary"
 INTERVAL=$(json_get '.limits.idle_poll_seconds' 8); case "$INTERVAL" in *[!0-9]*|'') INTERVAL=8 ;; esac
 fails=0; last_fail=""
 
+# Single-watcher lock (per state dir), so two watchers on ONE coordination state can't
+# double-process requests / race the transcript. The claim is an ATOMIC `mkdir` of a lock
+# DIRECTORY: exactly one racer wins a concurrent start (a pid-FILE check-then-write would
+# let both through). ALL modes contend — a `--once` review is NOT short if it runs a full
+# agent review beside a persistent watcher. The REAL fix for concurrency is one
+# AF_STATE_DIR per session; this backstop just makes an accidental double-watch fail loudly.
+LOCKDIR="$SHARED/.watcher.lock"
+# Claim is a single ATOMIC mkdir — exactly one racer can win, EVER. We deliberately do NOT
+# auto-reclaim a stale lock: any rm-then-remkdir dance reintroduces a race (two starters can
+# both delete + recreate). So if mkdir fails we ALWAYS refuse; a lock left by a *crashed*
+# watcher is surfaced by `doctor` with the exact `rm -rf` to clear. Fail-closed, race-free.
+if mkdir "$LOCKDIR" 2>/dev/null; then
+  # Owner-token = our pid. Publication is MANDATORY: on failure, remove only the dir we
+  # just created and refuse (never leave a claimed-but-unowned lock).
+  if ! echo $$ > "$LOCKDIR/pid" 2>/dev/null; then
+    rm -rf "$LOCKDIR"
+    echo "secondary-loop: could not write lock owner pid in $SHARED — refusing." >&2
+    exit 2
+  fi
+  # Cleanup removes the lock ONLY while we still own it (token still matches our pid) — so a
+  # cleanup can never delete a lock that is not ours. INT/TERM must EXPLICITLY exit: a POSIX
+  # trap does not imply exit, so without it a signalled watcher would keep running unlocked.
+  _release_lock() { if [ "$(cat "$LOCKDIR/pid" 2>/dev/null || echo)" = "$$" ]; then rm -rf "$LOCKDIR"; fi; }
+  trap '_release_lock' EXIT
+  trap '_release_lock; exit 130' INT
+  trap '_release_lock; exit 143' TERM
+else
+  # Guarded read (|| echo) so a missing/unreadable pid file can't abort us under set -e.
+  owner=$(cat "$LOCKDIR/pid" 2>/dev/null || echo "?")
+  echo "secondary-loop: another watcher (pid $owner) already owns this state dir:" >&2
+  echo "  $SHARED" >&2
+  echo "Give each concurrent session its own AF_STATE_DIR. If this lock is stale (the owner" >&2
+  echo "crashed — 'doctor' confirms), clear it: rm -rf \"$LOCKDIR\". Refusing to double-watch." >&2
+  exit 5
+fi
+
 # Decouple the loop's stop-check cadence from status.max_idle_seconds. That limit is
 # the PRIMARY's patience budget before it declares the Secondary dead — deliberately
 # generous (default 900s). If the loop inherited it as its OWN idle window, a graceful
@@ -92,6 +128,42 @@ append_transcript() {
   } >> "$CONV"
 }
 
+# Rotate conversation.md when it grows past the cap, so the append-only transcript can't
+# grow unbounded. Keeps ONE rolling backup (conversation.md.1, overwritten each rotation),
+# bounding on-disk size to ~2x the cap. Bytes-based; cap via AF_CONV_MAX_KB (default 512).
+# doctor flags an oversized .1 backup. Called BOTH at startup (rotates a large transcript
+# left by a prior session) AND after each append (bounds a single long-lived loop, not
+# just across restarts). Callers gate it on the pause/stop state so a paused system stays
+# frozen (see below). NOTE: single-Secondary is assumed — this is not locked against a
+# second concurrent secondary-loop racing the size-check/mv (unsupported configuration).
+CONV_MAX_KB=${AF_CONV_MAX_KB:-512}
+case "$CONV_MAX_KB" in ''|*[!0-9]*|??????????*) CONV_MAX_KB=512 ;; esac  # non-int/overflow -> default
+maybe_rotate_conv() {
+  # Defense in depth: a human-paused system does NO automation and a pending stop means we
+  # are exiting — in neither case may ANY caller rotate the transcript (PROTOCOL §14).
+  { [ -e "$STOP" ] || [ "$(json_get '.human_required' false)" = "true" ]; } && return 0
+  [ -f "$CONV" ] || return 0
+  cbytes=$(wc -c < "$CONV" 2>/dev/null) || return 0
+  [ "$(( cbytes / 1024 ))" -ge "$CONV_MAX_KB" ] || return 0
+  # Rotation is REQUIRED now (over cap). If it cannot happen, WARN and return nonzero —
+  # never report success while leaving the transcript over the cap. Reviews still continue
+  # (the transcript is non-authoritative; doctor's oversized-log check is the backstop) —
+  # halting the Secondary over a log-rotation hiccup would be disproportionate.
+  if [ -e "$CONV.1" ] && [ ! -f "$CONV.1" ]; then
+    echo "secondary-loop: WARNING conversation.md.1 is not a regular file — cannot rotate; transcript over cap." >&2
+    return 1
+  fi
+  if mv "$CONV" "$CONV.1"; then
+    echo "secondary-loop: rotated conversation.md ($(( cbytes / 1024 ))KB >= ${CONV_MAX_KB}KB) -> conversation.md.1" >&2
+    return 0
+  fi
+  echo "secondary-loop: WARNING failed to rotate conversation.md (mv failed) — transcript over cap." >&2
+  return 1
+}
+
+maybe_rotate_conv || true   # startup: rotate a stale large transcript (|| true: a rotation
+                            # failure warns inside the fn but must NOT abort the watcher under set -e)
+
 echo "secondary-loop: watching with provider=$PROVIDER (idle window ${EFFECTIVE_IDLE}s). stop with: touch $STOP" >&2
 while : ; do
   if [ -e "$STOP" ]; then rm -f "$STOP"; echo "secondary-loop: stop sentinel seen — exiting." >&2; exit 0; fi
@@ -116,14 +188,41 @@ while : ; do
       fi
       echo "secondary-loop: reviewing $id ($PROVIDER)" >&2
       "$AGENT_CMD" "$id" >&2 2>&1 || true
-      if [ -f "$RESPONSES/$id.response.md" ]; then
-        append_transcript "$id"
-        log_append "SECONDARY" "HEADLESS_REVIEW" "Headless $PROVIDER review of $id." "$id"
+      # Accept a review as complete ONLY if the final file is a VALID response for THIS id —
+      # not merely present. The agent runs in workspace-write and could (by accident or via
+      # prompt injection in reviewed material) write a truncated, malformed, or wrong-id file
+      # directly, bypassing complete-request. A bare existence test would then log a nominal
+      # review AND — because watch treats any final file as "processed" — permanently hide the
+      # request from the queue. (complete-request uses the same validator, so a legitimately
+      # published response always passes this.)
+      _resp="$RESPONSES/$id.response.md"
+      if [ -f "$_resp" ] && validate_response_file "$_resp" >/dev/null 2>&1 \
+         && [ "$(fm_value "$_resp" request_id)" = "$id" ]; then
+        # The agent may have run for minutes; a pause/stop could have been established while
+        # it ran (and complete-request already handed ownership to the Primary). Do NOT
+        # mutate shared state (transcript/rotation/log) on a now-paused or stopping system
+        # (PROTOCOL §14). The response itself is already published by the agent — the
+        # Secondary's own allowed transition — so we just skip the bookkeeping.
+        if [ -e "$STOP" ] || [ "$(json_get '.human_required' false)" = "true" ]; then
+          echo "secondary-loop: pause/stop detected after review of $id — skipping transcript/log." >&2
+        else
+          append_transcript "$id"
+          maybe_rotate_conv || true   # bound growth WITHIN a long-lived loop (|| true so a
+                                      # rotation failure warns but never aborts the watcher under set -e)
+          log_append "SECONDARY" "HEADLESS_REVIEW" "Headless $PROVIDER review of $id." "$id"
+        fi
         fails=0; last_fail=""
         [ "$ONCE" = 1 ] && exit 0
       else
-        # A failed review must NOT look successful (no transcript/log); surface it.
-        echo "secondary-loop: no response published for $id (agent failed)." >&2
+        # A failed review must NOT look successful (no transcript/log); surface it. If a
+        # final file exists but is INVALID or for the wrong id, discard it — otherwise it
+        # would masquerade as "processed" (watch keys off the final path) and block retries.
+        if [ -f "$_resp" ]; then
+          echo "secondary-loop: $id produced an invalid/mismatched response — discarding it." >&2
+          rm -f "$_resp"
+        else
+          echo "secondary-loop: no response published for $id (agent failed)." >&2
+        fi
         [ "$ONCE" = 1 ] && exit 1
         if [ "$id" = "$last_fail" ]; then fails=$((fails + 1)); else fails=1; last_fail=$id; fi
         [ "$fails" -ge 3 ] && { echo "secondary-loop: giving up on $id after $fails failed attempts." >&2; exit 1; }

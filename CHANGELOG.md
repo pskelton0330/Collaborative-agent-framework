@@ -4,7 +4,66 @@ All notable changes to this framework are recorded here. Dates are UTC.
 
 ## [Unreleased]
 
+### Changed
+- **Headless review speed.** Two framework-induced costs made each codex review take
+  5-7 min vs a bare codex query: (1) `secondary-agent` inherited the user's global
+  `model_reasoning_effort` (often `ultra` = max depth); it now defaults to **`high`**
+  (noticeably faster than ultra — a full review pipeline dropped from 485s to 50s at
+  `medium` on the same task; `high` sits between — while keeping strong review depth),
+  overridable via `SECONDARY_REASONING_EFFORT` / `--effort ultra|high|medium|low` (drop to
+  `medium`/`low` for quick iteration, or `ultra` for a deliberate deep audit). (2) The
+  reviewer prompt told the agent to read `PROTOCOL.md` (566 lines) + `SECONDARY_AGENT.md`
+  every review — ~40K of internal docs not needed to review code; the prompt now tells it
+  NOT to (the contract is inline). Working directory was ruled out (trivial codex call:
+  3.6s in the 6.6M framework dir vs 3.7s empty). Also fixes the reviewer prompt to use
+  `$SHARED` instead of a hardcoded `shared/`, so a review in an isolated `AF_STATE_DIR`
+  reads/writes the correct paths.
+
+### Fixed
+- **`secondary-loop` accepted a review by file existence alone.** It now requires the final
+  response to pass `validate_response_file` AND carry a matching `request_id` before
+  logging it as complete — so an agent that writes a truncated, malformed, or wrong-id file
+  directly (by accident or via prompt injection in reviewed material), bypassing
+  `complete-request`, no longer falsely completes a review; such a file is discarded rather
+  than left to masquerade as "processed" and block the request's retries.
+- **A rotation failure could kill the watcher.** `maybe_rotate_conv` returns nonzero on
+  failure and was called bare under `set -e`, so a non-regular `conversation.md.1` (or any
+  `mv` failure) aborted the Secondary. Now called with `|| true` — the failure warns but
+  reviews continue, as documented.
+
 ### Added
+- **Concurrent multi-session support (`AF_STATE_DIR`).** Two Primaries sharing one
+  `shared/` collide on the single-owner state machine (one `active_request`/owner). Set
+  `AF_STATE_DIR` to give a session its OWN isolated coordination-state tree (bootstrapped
+  automatically, seeded from the framework) so several `/collab` sessions run at once with
+  zero cross-talk — the framework CODE stays shared, only live state is per-session. The
+  `/collab` skill sets a unique `shared/runs/<id>/` per session automatically. Backstop: a
+  **single-watcher lock** (`$AF_STATE_DIR/.watcher.pid`) makes a second persistent
+  `secondary-loop` on the same state dir refuse (exit 5) instead of double-processing; a
+  crashed watcher's lock is reclaimed on next start; `doctor` reports the lock (and flags a
+  stale one) plus the active state dir. Default (unset) behavior is unchanged. 8 new tests
+  (isolation, fresh-dir bootstrap, lock refusal, stale/live lock detection).
+- **Archival-hygiene sweep + operational `doctor` warnings.** Long sessions left dozens
+  of resolved reviews un-archived in `shared/responses/`, plus oversized append-only
+  logs and stray work artifacts in the coordination dir — none of which `doctor` saw.
+  New: `scripts/archive-resolved`, a wind-down sweep that archives every
+  resolved-but-un-archived exchange in one call (delegating the moves to
+  `archive-request` for its two-phase safety). It is fail-closed: it refuses unless the
+  system is provably quiescent — a strict `jq` idle-tuple predicate (`state=idle`,
+  `active_request=null`, `human_required=false`) plus a file-authoritative
+  `unprocessed_ids`-empty backstop — so a partial/stale/corrupt status cannot license a
+  sweep, and the active *thread* (root + all its re-audit/escalation members) is held
+  back so a live thread is never split. `--dry-run` previews. `scripts/doctor` gains
+  three warnings: resolved-but-un-archived backlog, oversized runtime logs
+  (`conversation.md`/`*.out`/rotated `.1`, cap `AF_LOG_WARN_KB`), and stray non-protocol
+  files in `shared/`. New shared helpers `resolved_unarchived_ids`, `active_thread_root`,
+  `thread_of`. 13 new tests (jq / no-jq / dash). Built and reviewed *through the
+  framework itself* (4 Secondary review cycles; see the archived
+  `REQ-20260727-133454` thread).
+- **`secondary-loop` conversation.md rotation.** The headless transcript is rotated to
+  `conversation.md.1` (one rolling backup) at watcher startup when it exceeds a cap
+  (`AF_CONV_MAX_KB`, default 512 KB), bounding on-disk size to ~2× the cap so the
+  transcript can't grow unbounded across sessions.
 - **Persistent headless Secondary + conversation transcript.** `scripts/secondary-loop`
   is the headless equivalent of leaving a Secondary in a second terminal: it blocks on
   `scripts/watch`, and on each published request runs a headless review via

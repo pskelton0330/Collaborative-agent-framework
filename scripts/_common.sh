@@ -16,7 +16,14 @@ _resolve_framework_dir() {
 }
 
 FRAMEWORK_DIR=${FRAMEWORK_DIR:-$(_resolve_framework_dir "$0")}
-SHARED="$FRAMEWORK_DIR/shared"
+# Coordination state lives in SHARED. By DEFAULT that is the framework's own shared/ dir
+# (single-session use, unchanged). Set AF_STATE_DIR to give a session its OWN isolated
+# coordination state (status.json, requests/, responses/, master-log, archive/) so
+# MULTIPLE Primaries can run concurrently against the shared framework CODE without
+# colliding on one status.json / request namespace. The framework's committed SEEDS are
+# always read from $SEED_DIR ($FRAMEWORK_DIR/shared) regardless of where live state lives.
+SEED_DIR="$FRAMEWORK_DIR/shared"
+SHARED="${AF_STATE_DIR:-$SEED_DIR}"
 REQUESTS="$SHARED/requests"
 RESPONSES="$SHARED/responses"
 ESCALATION="$SHARED/escalation"
@@ -25,13 +32,42 @@ TEMPLATES="$FRAMEWORK_DIR/templates"
 STATUS="$SHARED/status.json"
 LOG="$SHARED/master-log.md"
 
-# The live status.json / master-log.md are runtime state (gitignored), so real use
-# never dirties the repo. On first use (e.g. a fresh clone), initialize them from the
-# committed pristine seeds. Cheap no-op once they exist.
-# Atomic (temp + mv in the same dir) so a concurrent first-use never reads a
-# half-copied file; absent seed degrades silently to json_get defaults.
-[ -f "$STATUS" ] || { [ -f "$SHARED/status.seed.json" ] && cp "$SHARED/status.seed.json" "$STATUS.tmp.$$" && mv "$STATUS.tmp.$$" "$STATUS"; }
-[ -f "$LOG" ]    || { [ -f "$SHARED/master-log.seed.md" ] && cp "$SHARED/master-log.seed.md" "$LOG.tmp.$$" && mv "$LOG.tmp.$$" "$LOG"; }
+# A per-session AF_STATE_DIR may be empty on first use — create the layout so the helper
+# scripts have somewhere to write. Guarded to the isolated case so the default shared/
+# (which ships these dirs committed) is never touched.
+if [ -n "${AF_STATE_DIR:-}" ]; then
+  # A RELATIVE AF_STATE_DIR resolves differently per process cwd, which would silently split
+  # one session's coordination state across directories. Require an absolute path.
+  case "$AF_STATE_DIR" in
+    /*) : ;;
+    *) echo "agent-framework: AF_STATE_DIR must be an absolute path, got: $AF_STATE_DIR" >&2; exit 2 ;;
+  esac
+  # Fail FAST if the isolation boundary can't be created — never mask it and degrade into
+  # the shared defaults with a half-built layout.
+  for _d in "$SHARED" "$REQUESTS" "$RESPONSES" "$ESCALATION" "$ARCHIVE" "$SHARED/plans"; do
+    [ -d "$_d" ] || mkdir -p "$_d" 2>/dev/null || {
+      echo "agent-framework: cannot create isolated state dir: $_d" >&2; exit 2; }
+  done
+fi
+
+# The live status.json / master-log.md are runtime state (gitignored), so real use never
+# dirties the repo. On first use (a fresh clone OR a fresh AF_STATE_DIR), initialize them
+# from the committed pristine SEEDS — always from $SEED_DIR, since an isolated state dir
+# has no seeds of its own. Atomic (temp + mv in the same dir) so a concurrent first-use
+# never reads a half-copied file; absent seed degrades silently to json_get defaults.
+# Explicit if-blocks (not `&&` chains): under dash a failing cp/mv inside an AND-OR list is
+# exempt from set -e and would be swallowed, leaving a half-initialized state that LOOKS
+# ready. A MISSING seed (the `[ -f seed ]` guard is false) still degrades silently to
+# json_get defaults (documented, broken-install case); a seed that EXISTS but fails to copy
+# is a real error → surface it and exit 2 rather than continue on partial state.
+if [ ! -f "$STATUS" ] && [ -f "$SEED_DIR/status.seed.json" ]; then
+  if cp "$SEED_DIR/status.seed.json" "$STATUS.tmp.$$" && mv "$STATUS.tmp.$$" "$STATUS"; then :
+  else rm -f "$STATUS.tmp.$$"; echo "agent-framework: failed to seed status.json in $SHARED" >&2; exit 2; fi
+fi
+if [ ! -f "$LOG" ] && [ -f "$SEED_DIR/master-log.seed.md" ]; then
+  if cp "$SEED_DIR/master-log.seed.md" "$LOG.tmp.$$" && mv "$LOG.tmp.$$" "$LOG"; then :
+  else rm -f "$LOG.tmp.$$"; echo "agent-framework: failed to seed master-log.md in $SHARED" >&2; exit 2; fi
+fi
 
 HAVE_JQ=0
 command -v jq >/dev/null 2>&1 && HAVE_JQ=1
@@ -159,6 +195,63 @@ unprocessed_ids() {
     [ -e "$RESPONSES/$i.response.md" ] && continue
     printf '%s\n' "$i"
   done
+}
+
+# resolved_unarchived_ids — list ids of RESOLVED-but-un-archived exchanges: a final
+# response still sitting in responses/ (a review the Secondary completed but the Primary
+# never archived). Enumerated from responses/ because a *.response.md there is, by
+# construction, un-archived — once archived it lives at archive/<id>/response.md.
+#
+# Fail-closed on the stem (defends the sweep): only a REGULAR file whose stem passes
+# valid_id is emitted. So a stray/malformed name — including one with glob metacharacters
+# that could re-expand in a consumer's cwd — is skipped here, never handed downstream.
+#
+# EXCLUDES the entire ACTIVE THREAD (not merely active_request). A thread spans many
+# request/response ids that share a root; only the latest is `active_request`, but the
+# earlier cycles' responses are still LIVE work sitting un-archived during a re-audit —
+# sweeping one would split the thread and collide with the eventual whole-thread archive.
+# So the active thread's root and every id whose `thread:` points at that root are held
+# back. When the system is idle (active_request null) nothing is excluded — every
+# un-archived response is then genuinely past backlog. Emits ids sorted (chronological).
+resolved_unarchived_ids() {
+  _root=$(active_thread_root)
+  for f in "$RESPONSES"/*.response.md; do
+    [ -f "$f" ] || continue                       # regular files only (skips odd entries)
+    b=$(basename "$f"); i=${b%.response.md}
+    valid_id "$i" || continue                     # fail-closed: only well-formed ids
+    if [ -n "$_root" ]; then
+      [ "$i" = "$_root" ] && continue             # the active thread's root
+      [ "$(thread_of "$i")" = "$_root" ] && continue  # a re-audit/escalation of it
+    fi
+    printf '%s\n' "$i"
+  done | sort
+}
+
+# thread_of <id> — the `thread:` value of <id>, read from whichever open artifact exists
+# (a normal request OR an escalation). Returns 0 and prints the value (which may be `null`
+# for a real root) when an artifact is found; returns 1 and prints NOTHING when neither
+# exists, so a caller can distinguish a genuine null-thread root from an unknown/missing
+# artifact rather than conflating them. Catches escalation members, not just re-audits.
+thread_of() {
+  for c in "$REQUESTS/$1.md" "$ESCALATION/$1.escalation.md"; do
+    [ -e "$c" ] && { fm_value "$c" thread; return 0; }
+  done
+  return 1
+}
+
+# active_thread_root — print the ROOT id of the currently active thread, or empty when
+# the system is idle (active_request null/absent). The root is active_request's own
+# `thread:` value, or active_request itself when that is null (it IS the root). Used to
+# hold the whole live thread back from the resolved-backlog sweep.
+active_thread_root() {
+  a=$(json_get '.active_request' "")
+  [ -n "$a" ] || return 0
+  r=$(thread_of "$a" || true)                     # reads request OR escalation artifact; `|| true`
+                                                  # so thread_of's nonzero (no artifact for a
+                                                  # dangling active_request) can't abort a set -e caller
+                                                  # via this command-substitution assignment
+  { [ -z "$r" ] || [ "$r" = "null" ]; } && r=$a   # own root, or artifact missing → the tip
+  printf '%s' "$r"
 }
 
 # validate_response_file <file> — 0 iff <file> satisfies the FULL response contract
